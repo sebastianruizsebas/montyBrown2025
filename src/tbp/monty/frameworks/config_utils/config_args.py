@@ -53,12 +53,6 @@ from tbp.monty.frameworks.loggers.wandb_handlers import (
 )
 from tbp.monty.frameworks.models.abstract_monty_classes import Monty
 from tbp.monty.frameworks.models.displacement_matching import DisplacementGraphLM
-<<<<<<< HEAD
-from tbp.monty.frameworks.models.evidence_matching.learning_module import (
-    EvidenceGraphLM,
-)
-=======
->>>>>>> refs/remotes/origin/main
 from tbp.monty.frameworks.models.evidence_matching.model import (
     MontyForEvidenceGraphMatching,
 )
