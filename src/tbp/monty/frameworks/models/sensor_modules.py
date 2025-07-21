@@ -15,7 +15,7 @@ import quaternion
 from scipy.spatial.transform import Rotation
 from skimage.color import rgb2hsv
 
-from tbp.monty.frameworks.models.monty_base import SensorModuleBase
+from tbp.monty.frameworks.models.abstract_monty_classes import SensorModule
 from tbp.monty.frameworks.models.states import State
 from tbp.monty.frameworks.utils.sensor_processing import (
     get_point_normal_naive,
@@ -27,8 +27,10 @@ from tbp.monty.frameworks.utils.sensor_processing import (
 )
 from tbp.monty.frameworks.utils.spatial_arithmetics import get_angle
 
+logger = logging.getLogger(__name__)
 
-class DetailedLoggingSM(SensorModuleBase):
+
+class DetailedLoggingSM(SensorModule):
     """Sensor module that keeps track of raw observations for logging."""
 
     def __init__(
@@ -38,6 +40,7 @@ class DetailedLoggingSM(SensorModuleBase):
         pc1_is_pc2_threshold=10,
         point_normal_method="TLS",
         weight_curvature=True,
+        **kwargs,
     ):
         """Initialize Sensor Module.
 
@@ -53,8 +56,12 @@ class DetailedLoggingSM(SensorModuleBase):
                 value will raise an error.
             weight_curvature: determines whether to use the "weighted" (True) or
                 "unweighted" (False) implementation for principal curvature extraction.
+            **kwargs: Additional keyword arguments.
         """
-        super(DetailedLoggingSM, self).__init__(sensor_module_id)
+        super().__init__(**kwargs)
+
+        self.sensor_module_id = sensor_module_id
+        self.state = None
         self.save_raw_obs = save_raw_obs
         self.raw_observations = []
         self.sm_properties = []
@@ -72,6 +79,11 @@ class DetailedLoggingSM(SensorModuleBase):
         return dict(
             raw_observations=self.raw_observations, sm_properties=self.sm_properties
         )
+
+    def update_state(self, state):
+        """Update information about the sensors location and rotation."""
+        # TODO: This stores the entire AgentState. Extract sensor-specific state.
+        self.state = state
 
     def step(self, data):
         """Add raw observations to SM buffer."""
@@ -115,6 +127,12 @@ class DetailedLoggingSM(SensorModuleBase):
         # saved
         self.visited_locs = []
         self.visited_normals = []
+
+    def post_episode(self):
+        pass
+
+    def set_experiment_mode(self, mode):
+        pass
 
     def extract_and_add_features(
         self,
@@ -208,11 +226,11 @@ class DetailedLoggingSM(SensorModuleBase):
 
         invalid_signals = (not valid_pn) or (not valid_pc)
         if invalid_signals:
-            logging.debug("Either the point-normal or pc-directions were ill-defined")
+            logger.debug("Either the point-normal or pc-directions were ill-defined")
 
         return features, morphological_features, invalid_signals
 
-    def observations_to_comunication_protocol(self, data, on_object_only=True):
+    def observations_to_comunication_protocol(self, data, on_object_only=True) -> State:
         """Turn raw observations into instance of State class following CMP.
 
         Args:
@@ -224,7 +242,7 @@ class DetailedLoggingSM(SensorModuleBase):
                     image that include an object.
 
         Returns:
-            State: Features and morphological features.
+            Features and morphological features.
         """
         obs_3d = data["semantic_3d"]
         sensor_frame_data = data["sensor_frame_data"]
@@ -460,10 +478,12 @@ class HabitatDistantPatchSM(DetailedLoggingSM, NoiseMixin):
             gaussian_curvature and mean_curvature should be used together to contain
             the same information as principal_curvatures.
         """
-        super(HabitatDistantPatchSM, self).__init__(
-            sensor_module_id, save_raw_obs, pc1_is_pc2_threshold
+        super().__init__(
+            sensor_module_id,
+            save_raw_obs,
+            pc1_is_pc2_threshold,
+            noise_params=noise_params,
         )
-        NoiseMixin.__init__(self, noise_params)
         possible_features = [
             "on_object",
             "object_coverage",
@@ -575,7 +595,7 @@ class HabitatSurfacePatchSM(HabitatDistantPatchSM):
         self.on_object_obs_only = False  # parameter used in step() method
 
 
-class FeatureChangeSM(HabitatDistantPatchSM, NoiseMixin):
+class FeatureChangeSM(HabitatDistantPatchSM):
     """Sensor Module that turns Habitat camera obs into features at locations.
 
     Takes in camera rgba and depth input and calculates locations from this.
@@ -608,7 +628,7 @@ class FeatureChangeSM(HabitatDistantPatchSM, NoiseMixin):
                 False.
             noise_params: ?. Defaults to None.
         """
-        super(FeatureChangeSM, self).__init__(
+        super().__init__(
             sensor_module_id, features, save_raw_obs, noise_params=noise_params
         )
         self.delta_thresholds = delta_thresholds
@@ -636,12 +656,12 @@ class FeatureChangeSM(HabitatDistantPatchSM, NoiseMixin):
             return patch_observation
 
         if self.last_features is None:  # first step
-            logging.debug("Performing first sensation step of FeatureChangeSM")
+            logger.debug("Performing first sensation step of FeatureChangeSM")
             self.last_features = patch_observation
             return patch_observation
 
         else:
-            logging.debug("Performing FeatureChangeSM step")
+            logger.debug("Performing FeatureChangeSM step")
             significant_feature_change = self.check_feature_change(patch_observation)
 
             # Save bool which will tell us whether to pass the information to LMs
@@ -669,7 +689,7 @@ class FeatureChangeSM(HabitatDistantPatchSM, NoiseMixin):
         if not observed_features.get_on_object():
             # Even for the surface-agent sensor, do not return a feature for LM
             # processing that is not on the object
-            logging.debug(f"No new point because not on object")
+            logger.debug(f"No new point because not on object")
             return False
 
         for feature in self.delta_thresholds.keys():
@@ -679,7 +699,7 @@ class FeatureChangeSM(HabitatDistantPatchSM, NoiseMixin):
 
             if feature == "n_steps":
                 if self.last_sent_n_steps_ago >= self.delta_thresholds[feature]:
-                    logging.debug(f"new point because of {feature}")
+                    logger.debug(f"new point because of {feature}")
                     return True
             elif feature == "distance":
                 distance = np.linalg.norm(
@@ -688,7 +708,7 @@ class FeatureChangeSM(HabitatDistantPatchSM, NoiseMixin):
                 )
 
                 if distance > self.delta_thresholds[feature]:
-                    logging.debug(f"new point because of {feature}")
+                    logger.debug(f"new point because of {feature}")
                     return True
 
             elif feature == "hsv":
@@ -702,7 +722,7 @@ class FeatureChangeSM(HabitatDistantPatchSM, NoiseMixin):
                 delta_change_sv = np.abs(last_feat[1:] - current_feat[1:])
                 for i, dc in enumerate(delta_change_sv):
                     if dc > self.delta_thresholds[feature][i + 1]:
-                        logging.debug(f"new point because of {feature} - {i + 1}")
+                        logger.debug(f"new point because of {feature} - {i + 1}")
                         return True
 
             elif feature == "pose_vectors":
@@ -711,7 +731,7 @@ class FeatureChangeSM(HabitatDistantPatchSM, NoiseMixin):
                     current_feat[0],
                 )
                 if angle_between >= self.delta_thresholds[feature][0]:
-                    logging.debug(
+                    logger.debug(
                         f"new point because of {feature} angle : {angle_between}"
                     )
                     return True
@@ -721,9 +741,9 @@ class FeatureChangeSM(HabitatDistantPatchSM, NoiseMixin):
                 if len(delta_change.shape) > 0:
                     for i, dc in enumerate(delta_change):
                         if dc > self.delta_thresholds[feature][i]:
-                            logging.debug(f"new point because of {feature} - {dc}")
+                            logger.debug(f"new point because of {feature} - {dc}")
                             return True
                 elif delta_change > self.delta_thresholds[feature]:
-                    logging.debug(f"new point because of {feature}")
+                    logger.debug(f"new point because of {feature}")
                     return True
         return False

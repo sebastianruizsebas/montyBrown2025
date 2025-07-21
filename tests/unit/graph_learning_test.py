@@ -8,6 +8,13 @@
 # license that can be found in the LICENSE file or at
 # https://opensource.org/licenses/MIT.
 
+import pytest
+
+pytest.importorskip(
+    "habitat_sim",
+    reason="Habitat Sim optional dependency not installed.",
+)
+
 import copy
 import os
 import shutil
@@ -135,7 +142,7 @@ class TrainedGraphLM:
         """Number of observations in the specified episode.
 
         Returns:
-            the number of observations in the episode
+            The number of observations in the episode.
         """
         return len(self.episodes[episode_num].observations)
 

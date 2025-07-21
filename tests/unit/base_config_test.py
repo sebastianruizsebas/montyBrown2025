@@ -7,6 +7,12 @@
 # Use of this source code is governed by the MIT
 # license that can be found in the LICENSE file or at
 # https://opensource.org/licenses/MIT.
+import pytest
+
+pytest.importorskip(
+    "habitat_sim",
+    reason="Habitat Sim optional dependency not installed.",
+)
 
 import copy
 import logging
@@ -16,10 +22,7 @@ import tempfile
 import unittest
 from pprint import pprint
 
-from tbp.monty.frameworks.config_utils.config_args import (
-    LoggingConfig,
-    SingleCameraMontyConfig,
-)
+from tbp.monty.frameworks.config_utils.config_args import LoggingConfig
 from tbp.monty.frameworks.config_utils.make_dataset_configs import (
     DebugExperimentArgs,
     EnvironmentDataLoaderPerObjectEvalArgs,
@@ -32,6 +35,9 @@ from tbp.monty.frameworks.experiments import MontyExperiment
 from tbp.monty.simulators.habitat.configs import (
     EnvInitArgsSinglePTZ,
     SinglePTZHabitatDatasetArgs,
+)
+from tests.unit.frameworks.config_utils.fakes.config_args import (
+    FakeSingleCameraMontyConfig,
 )
 
 
@@ -46,7 +52,7 @@ class BaseConfigTest(unittest.TestCase):
             logging_config=LoggingConfig(
                 output_dir=self.output_dir, python_log_level="DEBUG"
             ),
-            monty_config=SingleCameraMontyConfig(),
+            monty_config=FakeSingleCameraMontyConfig(),
             dataset_class=ED.EnvironmentDataset,
             dataset_args=SinglePTZHabitatDatasetArgs(
                 env_init_args=EnvInitArgsSinglePTZ(data_path=None).__dict__
@@ -188,15 +194,17 @@ class BaseConfigTest(unittest.TestCase):
             new_lm = exp_2.model.learning_modules[0]
             self.assertEqual(new_lm.test_attr_2, new_attr, "attrs did not match")
 
-    def test_logging_debug_level(self):
+    def test_logging_debug_level(self) -> None:
         """Check that logs go to a file, we can load them, and they have basic info."""
         base_config = copy.deepcopy(self.base_config)
         with MontyExperiment(base_config) as exp:
             # Add some stuff to the logs, verify it shows up
             info_message = "INFO is in the log"
             warning_message = "WARNING is in the log"
-            logging.info(info_message)
-            logging.warning(warning_message)
+
+            logger = logging.getLogger("tbp.monty")
+            logger.info(info_message)
+            logger.warning(warning_message)
 
             with open(os.path.join(exp.output_dir, "log.txt"), "r") as f:
                 log = f.read()
@@ -204,7 +212,7 @@ class BaseConfigTest(unittest.TestCase):
             self.assertTrue(info_message in log)
             self.assertTrue(warning_message in log)
 
-    def test_logging_info_level(self):
+    def test_logging_info_level(self) -> None:
         """Check that if we set logging level to info, debug logs do not show up."""
         base_config = copy.deepcopy(self.base_config)
         base_config["logging_config"].python_log_level = logging.INFO
@@ -212,8 +220,10 @@ class BaseConfigTest(unittest.TestCase):
             # Add some stuff to the logs, verify it shows up
             debug_message = "DEBUG is in the log"
             warning_message = "WARNING is in the log"
-            logging.debug(debug_message)
-            logging.warning(warning_message)
+
+            logger = logging.getLogger("tbp.monty")
+            logger.debug(debug_message)
+            logger.warning(warning_message)
 
             with open(os.path.join(exp.output_dir, "log.txt"), "r") as f:
                 log = f.read()
