@@ -681,6 +681,58 @@ class TwoLMStackedDistantMountConfig:
 
 
 @dataclass
+class FiveLMStackedDistantMountConfig:
+    # Five sensor patches at the same location with different receptive field sizes
+    agent_id: Union[str, None] = "agent_id_0"
+    sensor_ids: Union[List[str], None] = field(
+        default_factory=lambda: [
+            "patch_0",
+            "patch_1",
+            "patch_2",
+            "patch_3",
+            "patch_4",
+            "view_finder",
+        ]
+    )
+    height: Union[float, None] = 0.0
+    position: List[Union[int, float]] = field(default_factory=lambda: [0.0, 1.5, 0.2])
+    resolutions: List[List[Union[int, float]]] = field(
+        default_factory=lambda: [
+            [64, 64],
+            [64, 64],
+            [64, 64],
+            [64, 64],
+            [64, 64],
+            [64, 64],
+        ]
+    )
+    positions: List[List[Union[int, float]]] = field(
+        default_factory=lambda: [
+            [0.0, 0.0, 0.0],
+            [0.0, 0.0, 0.0],
+            [0.0, 0.0, 0.0],
+            [0.0, 0.0, 0.0],
+            [0.0, 0.0, 0.0],
+            [0.0, 0.0, 0.0],
+        ]
+    )
+    rotations: List[List[Union[int, float]]] = field(
+        default_factory=lambda: [
+            [1.0, 0.0, 0.0, 0.0],
+            [1.0, 0.0, 0.0, 0.0],
+            [1.0, 0.0, 0.0, 0.0],
+            [1.0, 0.0, 0.0, 0.0],
+            [1.0, 0.0, 0.0, 0.0],
+            [1.0, 0.0, 0.0, 0.0],
+        ]
+    )
+    semantics: List[List[Union[int, float]]] = field(
+        default_factory=lambda: [False, False, False, False, False, False]
+    )
+    zooms: List[float] = field(default_factory=lambda: [10.0, 8.0, 6.0, 4.0, 2.0, 1.0])
+
+
+@dataclass
 class TwoLMStackedSurfaceMountConfig(TwoLMStackedDistantMountConfig):
     action_space_type: str = "surface_agent"
 
@@ -771,10 +823,10 @@ def make_sensor_positions_on_grid(
     sensor position 0 (i.e., (0, 0, 0)).
 
     Args:
-        n_sensors (int): Number of sensors. Count should not include a view finder.
-        delta (number): The grid spacing length. By default, sensors will be
+        n_sensors: Number of sensors. Count should not include a view finder.
+        delta: The grid spacing length. By default, sensors will be
             placed every centimeter (units are in meters).
-        order_by (str, optional): How to select points on the grid that will contain
+        order_by: How to select points on the grid that will contain
             sensors.
              - "spiral": sensors are numbered along a counter-clockwise spiral
                 spreading outwards from the center.
@@ -783,16 +835,15 @@ def make_sensor_positions_on_grid(
                 results in sensors generally more packed towards the center.
                 Positions that are equidistant from the center are ordered
                 counterclockwise starting at 3 o'clock.
-        add_view_finder (bool, optional): Whether to include an extra position module
+        add_view_finder: Whether to include an extra position module
             at the origin to serve as a view finder. Defaults to `True`.
 
     Returns:
-        np.ndarray: A 2D array of sensor positions where each row is an array of
-            (x, y, z) positions. If `add_view_finder` is True, the array has
-            `n_sensors + 1` rows, where the last row corresponds to the view finder's
-            position and is identical to row 0. Otherwise, the array has `n_sensors`
-            rows. row 0 is always centered at (0, 0, 0), and all other rows are offset
-            relative to it.
+        A 2D array of sensor positions where each row is an array of (x, y, z)
+        positions. If `add_view_finder` is True, the array has `n_sensors + 1` rows,
+        where the last row corresponds to the view finder's position and is identical to
+        row 0. Otherwise, the array has `n_sensors` rows. row 0 is always centered at
+        (0, 0, 0), and all other rows are offset relative to it.
 
     """
     assert n_sensors > 0, "n_sensors must be greater than 0"
@@ -914,8 +965,8 @@ def make_multi_sensor_mount_config(
           except for the view finder (which has a zoom of 1.0)
 
     Returns:
-        dict: A dictionary representing a complete multi-sensor mount config. Arrays
-            are converted to lists.
+        A dictionary representing a complete multi-sensor mount config. Arrays are
+        converted to lists.
 
     """
     assert n_sensors > 0, "n_sensors must be a positive integer"

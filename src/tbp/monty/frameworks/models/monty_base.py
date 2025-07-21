@@ -261,6 +261,9 @@ class MontyBase(Monty):
             return None
 
         for lm_input in inputs_from_lms:
+            #Change from Santi
+            if lm_input is None:
+                continue
             if lm_input.use_state:
                 combined_inputs.append(lm_input)
         return combined_inputs

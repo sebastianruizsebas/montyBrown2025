@@ -101,8 +101,6 @@ NAMES.extend(field.name for field in fields(UnsupervisedInferenceExperiments))
 
 @dataclass
 class MyExperiments:
-    # Add your experiment names here
-    pass
-
+    TwoLMtrain: dict
 
 NAMES.extend(field.name for field in fields(MyExperiments))

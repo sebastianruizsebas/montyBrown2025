@@ -12,6 +12,7 @@ from typing import Callable, Dict, List, Mapping, Union
 
 from tbp.monty.frameworks.config_utils.make_dataset_configs import (
     FiveLMMountConfig,
+    FiveLMStackedDistantMountConfig,
     MultiLMMountConfig,
     PatchAndViewFinderMountConfig,
     PatchAndViewFinderMountLowResConfig,
@@ -81,6 +82,43 @@ class EnvInitArgs:
     seed: int = field(default=42)
     data_path: str = os.path.join(os.environ["MONTY_DATA"], "habitat/objects/ycb")
 
+
+@dataclass
+class MultiLMMountHabitatDatasetArgs:
+    env_init_func: Callable = field(default=HabitatEnvironment)
+    env_init_args: Dict = field(
+        default_factory=lambda: EnvInitArgsMultiLMMount().__dict__
+    )
+    transform: Union[Callable, list, None] = None
+
+    def __post_init__(self):
+        agent_args = self.env_init_args["agents"][0].agent_args
+        self.transform = [
+            MissingToMaxDepth(agent_id=agent_args["agent_id"], max_depth=1),
+            DepthTo3DLocations(
+                agent_id=agent_args["agent_id"],
+                sensor_ids=agent_args["sensor_ids"],
+                resolutions=agent_args["resolutions"],
+                world_coord=True,
+                zooms=agent_args["zooms"],
+                get_all_points=True,
+                use_semantic_sensor=False,
+            ),
+        ]
+
+@dataclass
+class FiveLMStackedDistantMountHabitatDatasetArgs(MultiLMMountHabitatDatasetArgs):
+    env_init_args: Dict = field(
+        default_factory=lambda: EnvInitArgsFiveLMDistantStackedMount().__dict__
+    )
+
+@dataclass
+class EnvInitArgsFiveLMDistantStackedMount(EnvInitArgs):
+    agents: List[AgentConfig] = field(
+        default_factory=lambda: [
+            AgentConfig(MultiSensorAgent, FiveLMStackedDistantMountConfig().__dict__)
+        ]
+    )
 
 @dataclass
 class EnvInitArgsSinglePTZ(EnvInitArgs):
