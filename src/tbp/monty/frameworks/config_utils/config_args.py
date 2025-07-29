@@ -64,6 +64,9 @@ from tbp.monty.frameworks.models.motor_policies import (
     SurfacePolicy,
     SurfacePolicyCurvatureInformed,
 )
+from tbp.monty.frameworks.models.evidence_matching.learning_module import (
+    EvidenceGraphLM,
+)
 from tbp.monty.frameworks.models.motor_system import MotorSystem
 from tbp.monty.frameworks.models.sensor_modules import (
     DetailedLoggingSM,
@@ -935,9 +938,105 @@ class TwoLMMontyConfig(MontyConfig):
     lm_to_lm_vote_matrix: List = field(default_factory=lambda: [[1], [0]])
     monty_args: Union[Dict, dataclass] = field(default_factory=MontyArgs)
 
-
 @dataclass
 class TwoLMStackedMontyConfig(TwoLMMontyConfig):
+    monty_class: Callable = MontyForEvidenceGraphMatching
+    learning_module_configs: Union[dataclass, Dict] = field(
+        default_factory=lambda: dict(
+            learning_module_0=dict(
+                learning_module_class=DisplacementGraphLM,
+                learning_module_args=dict(k=5, match_attribute="displacement"),
+            ),
+            learning_module_1=dict(
+                learning_module_class=DisplacementGraphLM,
+                learning_module_args=dict(k=5, match_attribute="displacement"),
+            ),
+        )
+    )
+    sensor_module_configs: Union[dataclass, Dict] = field(
+        default_factory=lambda: dict(
+            sensor_module_0=dict(
+                sensor_module_class=FeatureChangeSM,
+                sensor_module_args=dict(
+                    sensor_module_id="patch_0",
+                    features=[
+                        # morphological features (nescessarry)
+                        "pose_vectors",
+                        "pose_fully_defined",
+                        "on_object",
+                        # non-morphological features (optional)
+                        "object_coverage",
+                        "min_depth",
+                        "mean_depth",
+                        "hsv",
+                        "principal_curvatures_log",
+                    ],
+                    delta_thresholds={
+                        "on_object": 0,
+                        "n_steps": 20,
+                        "hsv": [0.1, 0.1, 0.1],
+                        "pose_vectors": [np.pi / 4, np.pi * 2, np.pi * 2],
+                        "principal_curvatures_log": [2, 2],
+                        "distance": 0.01,
+                    },
+                    save_raw_obs=True,
+                ),
+            ),
+            sensor_module_1=dict(
+                sensor_module_class=FeatureChangeSM,
+                sensor_module_args=dict(
+                    sensor_module_id="patch_1",
+                    features=[
+                        # morphological features (nescessarry)
+                        "pose_vectors",
+                        "pose_fully_defined",
+                        "on_object",
+                        # non-morphological features (optional)
+                        "object_coverage",
+                        "hsv",
+                        "principal_curvatures_log",
+                    ],
+                    delta_thresholds={
+                        "on_object": 0,
+                        "n_steps": 100,
+                        "hsv": [0.2, 0.2, 0.2],
+                        "pose_vectors": [np.pi / 4, np.pi * 2, np.pi * 2],
+                        "principal_curvatures_log": [4, 4],
+                        "distance": 0.05,
+                    },
+                    save_raw_obs=True,
+                ),
+            ),
+            sensor_module_2=dict(
+                # No need to extract features from the view finder since it is not
+                # connected to a learning module (just used at beginning of episode)
+                sensor_module_class=DetailedLoggingSM,
+                sensor_module_args=dict(
+                    sensor_module_id="view_finder",
+                    save_raw_obs=True,
+                ),
+            ),
+        )
+    )
+    sm_to_agent_dict: Dict = field(
+        default_factory=lambda: dict(
+            patch_0="agent_id_0",
+            patch_1="agent_id_0",
+            view_finder="agent_id_0",
+        )
+    )
+    sm_to_lm_matrix: List = field(
+        default_factory=lambda: [
+            [0],
+            [],  
+        ],  # View finder (sm2) not connected to lm
+    )
+    # First LM only gets sensory input, second gets input from first + sensor
+    lm_to_lm_matrix: Optional[List] = field(default_factory=lambda: [[], [0]])
+    lm_to_lm_vote_matrix: Optional[List] = None
+    
+@dataclass
+class TwoLMStackedEvidenceMontyConfig(TwoLMMontyConfig):
     monty_class: Callable = MontyForGraphMatching
     learning_module_configs: Union[dataclass, Dict] = field(
         default_factory=lambda: dict(
@@ -982,22 +1081,7 @@ class TwoLMStackedMontyConfig(TwoLMMontyConfig):
                 sensor_module_class=HabitatDistantPatchSM,
                 sensor_module_args=dict(
                     sensor_module_id="patch_0",
-                    features=[
-                        # morphological features (nescessarry)
-                        "pose_vectors",
-                        "pose_fully_defined",
-                        "on_object",
-                        # non-morphological features (optional)
-                        "object_coverage",
-                        "hsv",
-                        "principal_curvatures",
-                        "principal_curvatures_log",
-                        "gaussian_curvature",
-                        "mean_curvature",
-                        "mean_depth",
-                        "gaussian_curvature_sc",
-                        "mean_curvature_sc",
-                    ],
+                    features=features,
                     save_raw_obs=False,
                 ),
             ),
@@ -1005,22 +1089,7 @@ class TwoLMStackedMontyConfig(TwoLMMontyConfig):
                 sensor_module_class=HabitatDistantPatchSM,
                 sensor_module_args=dict(
                     sensor_module_id="patch_1",
-                    features=[
-                        # morphological features (nescessarry)
-                        "pose_vectors",
-                        "pose_fully_defined",
-                        "on_object",
-                        # non-morphological features (optional)
-                        "object_coverage",
-                        "hsv",
-                        "principal_curvatures",
-                        "principal_curvatures_log",
-                        "gaussian_curvature",
-                        "mean_curvature",
-                        "mean_depth",
-                        "gaussian_curvature_sc",
-                        "mean_curvature_sc",
-                    ],
+                    features=features,
                     save_raw_obs=False,
                 ),
             ),

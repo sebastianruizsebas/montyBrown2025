@@ -33,6 +33,8 @@ logger = logging.getLogger(__name__)
 
 def load_stats(
     exp_path,
+    train_stats_path,
+    model_path_file,
     load_train=True,
     load_eval=True,
     load_detailed=True,
@@ -50,7 +52,7 @@ def load_stats(
     train_stats, eval_stats, detailed_stats, lm_models = None, None, None, None
     if load_train:
         print("...loading and checking train statistics...")
-        train_stats = pd.read_csv(os.path.join(exp_path, "train_stats.csv"))
+        train_stats = pd.read_csv(os.path.join(train_stats_path, "train_stats.csv"))
 
     if load_eval:
         print("...loading and checking eval statistics...")
@@ -68,7 +70,7 @@ def load_stats(
 
     if load_models:
         print("...loading LM models...")
-        lm_models = load_models_from_dir(exp_path, pretrained_dict)
+        lm_models = load_models_from_dir(model_path_file)
 
     return train_stats, eval_stats, detailed_stats, lm_models
 

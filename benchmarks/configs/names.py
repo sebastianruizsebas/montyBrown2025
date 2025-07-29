@@ -101,6 +101,6 @@ NAMES.extend(field.name for field in fields(UnsupervisedInferenceExperiments))
 
 @dataclass
 class MyExperiments:
-    TwoLMtrain: dict
+    dist_agent_2lm_stack_eval: dict
 
 NAMES.extend(field.name for field in fields(MyExperiments))
