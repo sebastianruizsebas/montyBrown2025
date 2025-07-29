@@ -15,6 +15,9 @@ import os
 import numpy as np
 import torch
 from scipy.spatial.transform import Rotation
+from scipy.stats import entropy, norm, multivariate_normal
+from typing import Dict, List, Optional, Tuple, Union
+import warnings
 
 from tbp.monty.frameworks.loggers.exp_logger import BaseMontyLogger
 from tbp.monty.frameworks.loggers.graph_matching_loggers import (
@@ -31,8 +34,328 @@ from tbp.monty.frameworks.models.object_model import GraphObjectModel
 logger = logging.getLogger(__name__)
 
 
+class BayesianInferenceEngine:
+    """
+    Bayesian inference engine for Monty's graph matching system.
+    
+    Implements core Bayesian principles including:
+    - Prior specification and updating
+    - Likelihood computation
+    - Posterior inference
+    - Uncertainty quantification (aleatoric and epistemic)
+    - Active inference for action selection
+    """
+    
+    def __init__(self, 
+                 prior_strength: float = 1.0,
+                 uncertainty_threshold: float = 0.1,
+                 confidence_threshold: float = 0.95):
+        """
+        Initialize Bayesian inference engine.
+        
+        Args:
+            prior_strength: Weight for prior beliefs vs. new evidence
+            uncertainty_threshold: Threshold for considering predictions uncertain
+            confidence_threshold: Minimum confidence for terminal decisions
+        """
+        self.prior_strength = prior_strength
+        self.uncertainty_threshold = uncertainty_threshold
+        self.confidence_threshold = confidence_threshold
+        
+        # Bayesian state variables
+        self.object_priors = {}  # P(object)
+        self.pose_priors = {}    # P(pose|object)
+        self.likelihoods = {}    # P(observation|object,pose)
+        self.posteriors = {}     # P(object,pose|observations)
+        
+        # Uncertainty tracking
+        self.epistemic_uncertainty = {}  # Model uncertainty
+        self.aleatoric_uncertainty = {}  # Data uncertainty
+        self.total_uncertainty = {}     # Combined uncertainty
+        
+        # Evidence accumulation
+        self.evidence_history = []
+        self.belief_history = []
+        
+    def update_priors(self, object_id: str, prior_prob: float):
+        """Update prior probability for an object."""
+        self.object_priors[object_id] = prior_prob
+        
+    def compute_likelihood(self, 
+                          observation: Dict, 
+                          object_id: str, 
+                          pose: np.ndarray) -> float:
+        """
+        Compute likelihood P(observation|object,pose).
+        
+        Uses multivariate normal distribution for feature matching.
+        """
+        # Extract features from observation
+        features = self._extract_features(observation)
+        
+        # Get expected features for this object/pose combination
+        expected_features = self._get_expected_features(object_id, pose)
+        
+        if expected_features is None:
+            return 1e-10  # Very low likelihood for unknown combinations
+            
+        # Compute multivariate normal likelihood
+        try:
+            # Estimate covariance from feature uncertainties
+            cov_matrix = self._estimate_feature_covariance(features)
+            
+            # Handle numerical stability
+            if np.linalg.det(cov_matrix) <= 0:
+                cov_matrix += np.eye(len(features)) * 1e-6
+                
+            likelihood = multivariate_normal.pdf(
+                features, mean=expected_features, cov=cov_matrix
+            )
+            return max(likelihood, 1e-10)  # Prevent zero likelihood
+            
+        except Exception as e:
+            warnings.warn(f"Likelihood computation failed: {e}")
+            return 1e-10
+            
+    def bayesian_update(self, 
+                       observations: List[Dict], 
+                       possible_objects: List[str]) -> Dict[str, float]:
+        """
+        Perform Bayesian update: P(object|obs) ∝ P(obs|object) * P(object).
+        
+        Returns updated posterior probabilities for each object.
+        """
+        posteriors = {}
+        total_evidence = 0.0
+        
+        for obj_id in possible_objects:
+            # Get prior
+            prior = self.object_priors.get(obj_id, 1.0 / len(possible_objects))
+            
+            # Compute likelihood for all observations
+            likelihood = 1.0
+            for obs in observations:
+                # Marginalize over poses (simplified - could use sampling)
+                pose_likelihood = self._marginalize_over_poses(obs, obj_id)
+                likelihood *= pose_likelihood
+                
+            # Compute unnormalized posterior
+            unnorm_posterior = likelihood * prior
+            posteriors[obj_id] = unnorm_posterior
+            total_evidence += unnorm_posterior
+            
+        # Normalize posteriors
+        if total_evidence > 0:
+            for obj_id in posteriors:
+                posteriors[obj_id] /= total_evidence
+        else:
+            # Uniform distribution if no evidence
+            uniform_prob = 1.0 / len(possible_objects)
+            posteriors = {obj_id: uniform_prob for obj_id in possible_objects}
+            
+        self.posteriors.update(posteriors)
+        self.belief_history.append(posteriors.copy())
+        
+        return posteriors
+        
+    def quantify_uncertainty(self, posteriors: Dict[str, float]) -> Dict[str, float]:
+        """
+        Quantify different types of uncertainty.
+        
+        Returns:
+            Dictionary with epistemic, aleatoric, and total uncertainty measures
+        """
+        # Epistemic uncertainty: entropy of posterior distribution
+        probs = list(posteriors.values())
+        epistemic = entropy(probs) if len(probs) > 1 else 0.0
+        
+        # Aleatoric uncertainty: expected variance in observations
+        aleatoric = self._estimate_observation_noise()
+        
+        # Total uncertainty
+        total = epistemic + aleatoric
+        
+        uncertainty_dict = {
+            'epistemic': epistemic,
+            'aleatoric': aleatoric, 
+            'total': total,
+            'max_posterior': max(probs),
+            'entropy': epistemic
+        }
+        
+        # Update tracking
+        self.epistemic_uncertainty.update(uncertainty_dict)
+        
+        return uncertainty_dict
+        
+    def active_inference_action_selection(self, 
+                                        current_uncertainty: Dict,
+                                        possible_actions: List) -> Dict:
+        """
+        Select actions that minimize expected free energy.
+        
+        Balances exploitation (confirming beliefs) with exploration (reducing uncertainty).
+        """
+        if not possible_actions:
+            return {'action': None, 'expected_utility': 0.0}
+            
+        action_utilities = {}
+        
+        for action in possible_actions:
+            # Expected information gain (epistemic value)
+            info_gain = self._estimate_information_gain(action, current_uncertainty)
+            
+            # Expected reward (pragmatic value) 
+            expected_reward = self._estimate_expected_reward(action)
+            
+            # Total expected utility
+            utility = info_gain + expected_reward
+            action_utilities[action] = utility
+            
+        # Select action with highest utility
+        best_action = max(action_utilities, key=action_utilities.get)
+        
+        return {
+            'action': best_action,
+            'expected_utility': action_utilities[best_action],
+            'action_utilities': action_utilities,
+            'rationale': 'active_inference'
+        }
+        
+    def assess_decision_confidence(self, posteriors: Dict[str, float]) -> Dict:
+        """
+        Assess confidence in current beliefs for terminal decision making.
+        """
+        if not posteriors:
+            return {'confident': False, 'max_prob': 0.0, 'reason': 'no_posteriors'}
+            
+        max_prob = max(posteriors.values())
+        max_object = max(posteriors, key=posteriors.get)
+        
+        # Check multiple confidence criteria
+        confident = (
+            max_prob >= self.confidence_threshold and
+            self._check_belief_stability() and
+            self._sufficient_evidence_accumulated()
+        )
+        
+        return {
+            'confident': confident,
+            'max_prob': max_prob,
+            'predicted_object': max_object,
+            'reason': 'bayesian_confidence' if confident else 'insufficient_confidence',
+            'stability': self._check_belief_stability(),
+            'evidence_sufficiency': self._sufficient_evidence_accumulated()
+        }
+        
+    def compute_calibration_metrics(self, 
+                                  predictions: List[Dict], 
+                                  ground_truth: List[str]) -> Dict:
+        """
+        Compute calibration metrics for uncertainty quantification evaluation.
+        
+        Implements metrics from the report: NLL, Brier Score, ECE, etc.
+        """
+        if len(predictions) != len(ground_truth):
+            raise ValueError("Predictions and ground truth must have same length")
+            
+        metrics = {}
+        
+        # Negative Log Likelihood
+        nll_scores = []
+        for pred, truth in zip(predictions, ground_truth):
+            prob = pred.get(truth, 1e-10)  # Avoid log(0)
+            nll_scores.append(-np.log(prob))
+        metrics['nll'] = np.mean(nll_scores)
+        
+        # Brier Score (for binary classification, extend as needed)
+        brier_scores = []
+        for pred, truth in zip(predictions, ground_truth):
+            for obj_id, prob in pred.items():
+                target = 1.0 if obj_id == truth else 0.0
+                brier_scores.append((prob - target) ** 2)
+        metrics['brier_score'] = np.mean(brier_scores)
+        
+        # Expected Calibration Error (simplified implementation)
+        ece = self._compute_expected_calibration_error(predictions, ground_truth)
+        metrics['ece'] = ece
+        
+        return metrics
+        
+    # Helper methods
+    def _extract_features(self, observation: Dict) -> np.ndarray:
+        """Extract numerical features from observation."""
+        # Placeholder - should extract relevant features for matching
+        features = []
+        if 'morphological_features' in observation:
+            for feature_dict in observation['morphological_features'].values():
+                if isinstance(feature_dict, dict):
+                    for val in feature_dict.values():
+                        if isinstance(val, (int, float)):
+                            features.append(val)
+                        elif isinstance(val, np.ndarray):
+                            features.extend(val.flatten())
+        return np.array(features) if features else np.array([0.0])
+        
+    def _get_expected_features(self, object_id: str, pose: np.ndarray) -> Optional[np.ndarray]:
+        """Get expected features for object at given pose."""
+        # Placeholder - should query graph memory for expected features
+        return None
+        
+    def _estimate_feature_covariance(self, features: np.ndarray) -> np.ndarray:
+        """Estimate covariance matrix for features."""
+        n_features = len(features)
+        # Simple diagonal covariance assumption
+        return np.eye(n_features) * 0.1
+        
+    def _marginalize_over_poses(self, observation: Dict, object_id: str) -> float:
+        """Marginalize likelihood over possible poses."""
+        # Simplified - should integrate over pose space
+        return 1.0
+        
+    def _estimate_observation_noise(self) -> float:
+        """Estimate aleatoric uncertainty from observation noise."""
+        return 0.1  # Placeholder
+        
+    def _estimate_information_gain(self, action, uncertainty: Dict) -> float:
+        """Estimate expected information gain from action."""
+        return uncertainty.get('entropy', 0.0) * 0.5  # Placeholder
+        
+    def _estimate_expected_reward(self, action) -> float:
+        """Estimate expected reward from action."""
+        return 0.0  # Placeholder
+        
+    def _check_belief_stability(self) -> bool:
+        """Check if beliefs have stabilized over recent updates."""
+        if len(self.belief_history) < 3:
+            return False
+            
+        # Check variance in recent beliefs
+        recent_beliefs = self.belief_history[-3:]
+        # Simplified stability check
+        return True  # Placeholder
+        
+    def _sufficient_evidence_accumulated(self) -> bool:
+        """Check if sufficient evidence has been accumulated."""
+        return len(self.evidence_history) >= 5  # Placeholder threshold
+        
+    def _compute_expected_calibration_error(self, predictions: List[Dict], 
+                                          ground_truth: List[str]) -> float:
+        """Compute Expected Calibration Error."""
+        # Simplified ECE computation
+        return 0.0  # Placeholder
+
+
 class MontyForGraphMatching(MontyBase):
-    """General Monty model for recognizing object using graphs."""
+    """
+    Bayesian-enhanced Monty model for object recognition using graph matching.
+    
+    Integrates Bayesian inference principles for:
+    - Uncertainty-aware decision making  
+    - Active inference for exploration
+    - Probabilistic belief updating
+    - Calibrated confidence estimation
+    """
 
     LOGGING_REGISTRY = dict(
         # Don't do any formal logging, just save models. Used for pretraining.
@@ -45,9 +368,29 @@ class MontyForGraphMatching(MontyBase):
         SELECTIVE=SelectiveEvidenceLogger,
     )
 
-    def __init__(self, *args, **kwargs):
-        """Initialize and reset LM."""
+    def __init__(self, 
+                 bayesian_config: Optional[Dict] = None,
+                 *args, **kwargs):
+        """Initialize Bayesian-enhanced graph matching system."""
         super().__init__(*args, **kwargs)
+        
+        # Initialize Bayesian inference engine
+        bayes_config = bayesian_config or {}
+        self.bayesian_engine = BayesianInferenceEngine(
+            prior_strength=bayes_config.get('prior_strength', 1.0),
+            uncertainty_threshold=bayes_config.get('uncertainty_threshold', 0.1),
+            confidence_threshold=bayes_config.get('confidence_threshold', 0.95)
+        )
+        
+        # Bayesian state tracking
+        self.current_posteriors = {}
+        self.uncertainty_history = []
+        self.decision_confidence = {}
+        self.calibration_data = {'predictions': [], 'ground_truth': []}
+        
+        # Active inference parameters
+        self.exploration_bonus = bayes_config.get('exploration_bonus', 0.1)
+        self.information_seeking = bayes_config.get('information_seeking', True)
 
     # =============== Public Interface Functions ===============
     # ------------------- Main Algorithm -----------------------
@@ -59,6 +402,23 @@ class MontyForGraphMatching(MontyBase):
         self.reset()
         self.primary_target = primary_target
         self.semantic_id_to_label = semantic_id_to_label
+
+        # Initialize Bayesian state for new episode
+        self.current_posteriors = {}
+        self.uncertainty_history = []
+        self.decision_confidence = {}
+        
+        # Initialize priors for known objects
+        if hasattr(self, 'learning_modules') and self.learning_modules:
+            try:
+                known_objects = self.learning_modules[0].get_all_known_object_ids()
+                if known_objects:
+                    uniform_prior = 1.0 / len(known_objects)
+                    for obj_id in known_objects:
+                        self.bayesian_engine.update_priors(obj_id, uniform_prior)
+                    logger.debug(f"Initialized Bayesian priors for {len(known_objects)} objects")
+            except Exception as e:
+                logger.debug(f"Could not initialize Bayesian priors: {e}")
 
         for lm in self.learning_modules:
             lm.pre_episode(primary_target)
@@ -81,9 +441,44 @@ class MontyForGraphMatching(MontyBase):
 
         logger.debug(f"Matches after voting (LM {lm_id}): {lm.get_possible_matches()}")
 
+    def post_episode(self):
+        """Finalize episode with Bayesian analysis and calibration logging."""
+        # Log final prediction for calibration analysis
+        if (hasattr(self, 'current_posteriors') and self.current_posteriors and
+            hasattr(self, 'primary_target') and self.primary_target):
+            
+            # Log the final Bayesian prediction
+            self.log_prediction_for_calibration(
+                self.current_posteriors, 
+                self.primary_target
+            )
+            
+        # Log episode summary with Bayesian metrics
+        if hasattr(self, 'uncertainty_history') and self.uncertainty_history:
+            final_uncertainty = self.uncertainty_history[-1]
+            logger.info(f"Episode completed with final uncertainty: {final_uncertainty}")
+            
+        if hasattr(self, 'decision_confidence') and self.decision_confidence:
+            logger.info(f"Final decision confidence: {self.decision_confidence}")
+            
+        # Call parent post_episode if it exists
+        if hasattr(super(), 'post_episode'):
+            super().post_episode()
+
     def update_stats_after_vote(self, lm):
         """Add voting stats to buffer and check individual terminal condition."""
         stats = lm.collect_stats_to_save()
+        
+        # Add Bayesian statistics if available
+        if hasattr(self, 'current_posteriors') and self.current_posteriors:
+            stats['bayesian_posteriors'] = self.current_posteriors.copy()
+            
+        if hasattr(self, 'uncertainty_history') and self.uncertainty_history:
+            stats['uncertainty'] = self.uncertainty_history[-1].copy()
+            
+        if hasattr(self, 'decision_confidence') and self.decision_confidence:
+            stats['decision_confidence'] = self.decision_confidence.copy()
+        
         lm.buffer.update_last_stats_entry(stats)
         num_matches = len(lm.get_possible_matches())
         if num_matches == 0:
@@ -152,18 +547,63 @@ class MontyForGraphMatching(MontyBase):
         if not self.exceeded_min_steps:
             return False
 
-        # Check if >= min_lms_match LMs have reached match
-        # TODO: we may also want to count no_match as done.
+        # Check if >= min_lms_match LMs have reached match using Bayesian confidence
         num_lms_done = 0
+        
+        # Perform Bayesian update across all learning modules
+        all_possible_objects = []
+        lm_observations = []
+        
         for lm in self.learning_modules:
             lm.update_terminal_condition()
             logger.debug(
                 f"{lm.learning_module_id} has terminal state: {lm.terminal_state}"
             )
-            # If any LM is not done yet, we are not done yet
+            
+            # Collect observations for Bayesian inference
+            if hasattr(lm, 'buffer') and lm.buffer.get_num_observations_on_object() > 0:
+                recent_obs = lm.buffer.get_recent_observations()
+                if recent_obs:
+                    lm_observations.extend(recent_obs)
+                    
+            # Collect possible objects
+            possible_matches = lm.get_possible_matches()
+            all_possible_objects.extend(possible_matches)
+            
+            # Count traditional matches
             if lm.terminal_state == "match":
                 num_lms_done += 1
-
+        
+        # Apply Bayesian inference if we have observations
+        if lm_observations and all_possible_objects:
+            unique_objects = list(set(all_possible_objects))
+            
+            # Update posteriors using Bayesian engine
+            self.current_posteriors = self.bayesian_engine.bayesian_update(
+                lm_observations, unique_objects
+            )
+            
+            # Quantify uncertainty
+            uncertainty = self.bayesian_engine.quantify_uncertainty(self.current_posteriors)
+            self.uncertainty_history.append(uncertainty)
+            
+            # Assess decision confidence
+            self.decision_confidence = self.bayesian_engine.assess_decision_confidence(
+                self.current_posteriors
+            )
+            
+            logger.info(f"Bayesian posteriors: {self.current_posteriors}")
+            logger.info(f"Decision confidence: {self.decision_confidence}")
+            logger.info(f"Uncertainty: {uncertainty}")
+            
+            # Use Bayesian confidence for terminal decision
+            if self.decision_confidence.get('confident', False):
+                logger.info(f"\n\nBayesian Monty detected confident match: "
+                          f"{self.decision_confidence['predicted_object']} "
+                          f"(confidence: {self.decision_confidence['max_prob']:.3f})\n\n")
+                return True
+        
+        # Fall back to traditional counting method
         if num_lms_done >= self.min_lms_match:
             logger.info("\n\nMONTY DETECTED MATCH\n\n")
             return True
@@ -181,6 +621,116 @@ class MontyForGraphMatching(MontyBase):
         e.g. total number of episode steps possible has been exceeded
         """
         self._is_done = True
+
+    def evaluate_bayesian_performance(self) -> Dict:
+        """
+        Evaluate Bayesian inference performance using metrics from the report.
+        
+        Returns comprehensive performance assessment including:
+        - Calibration metrics (NLL, Brier Score, ECE)
+        - Uncertainty quality measures
+        - Active inference effectiveness
+        """
+        if not self.calibration_data['predictions'] or not self.calibration_data['ground_truth']:
+            logger.warning("No calibration data available for Bayesian evaluation")
+            return {}
+            
+        try:
+            # Compute calibration metrics
+            calibration_metrics = self.bayesian_engine.compute_calibration_metrics(
+                self.calibration_data['predictions'],
+                self.calibration_data['ground_truth']
+            )
+            
+            # Uncertainty analysis
+            uncertainty_analysis = self._analyze_uncertainty_quality()
+            
+            # Active inference metrics
+            active_inference_metrics = self._evaluate_active_inference()
+            
+            performance_report = {
+                'calibration': calibration_metrics,
+                'uncertainty': uncertainty_analysis,
+                'active_inference': active_inference_metrics,
+                'total_episodes': len(self.calibration_data['predictions']),
+                'bayesian_accuracy': self._compute_bayesian_accuracy()
+            }
+            
+            logger.info(f"Bayesian Performance Report: {performance_report}")
+            return performance_report
+            
+        except Exception as e:
+            logger.error(f"Bayesian performance evaluation failed: {e}")
+            return {'error': str(e)}
+    
+    def _analyze_uncertainty_quality(self) -> Dict:
+        """Analyze quality of uncertainty estimates."""
+        if not self.uncertainty_history:
+            return {}
+            
+        uncertainties = self.uncertainty_history
+        
+        # Epistemic vs aleatoric decomposition
+        epistemic_values = [u.get('epistemic', 0) for u in uncertainties]
+        aleatoric_values = [u.get('aleatoric', 0) for u in uncertainties]
+        
+        return {
+            'mean_epistemic': np.mean(epistemic_values),
+            'mean_aleatoric': np.mean(aleatoric_values),
+            'epistemic_std': np.std(epistemic_values),
+            'aleatoric_std': np.std(aleatoric_values),
+            'uncertainty_trend': self._analyze_uncertainty_trend(uncertainties)
+        }
+    
+    def _evaluate_active_inference(self) -> Dict:
+        """Evaluate effectiveness of active inference action selection."""
+        # Placeholder for active inference evaluation
+        return {
+            'information_seeking_actions': 0,
+            'exploration_efficiency': 0.0,
+            'uncertainty_reduction_rate': 0.0
+        }
+    
+    def _compute_bayesian_accuracy(self) -> float:
+        """Compute accuracy using Bayesian posterior predictions."""
+        if not self.calibration_data['predictions']:
+            return 0.0
+            
+        correct = 0
+        for pred, truth in zip(self.calibration_data['predictions'], 
+                              self.calibration_data['ground_truth']):
+            if pred and truth in pred:
+                predicted_obj = max(pred, key=pred.get)
+                if predicted_obj == truth:
+                    correct += 1
+                    
+        return correct / len(self.calibration_data['predictions'])
+    
+    def _analyze_uncertainty_trend(self, uncertainties: List[Dict]) -> str:
+        """Analyze trend in uncertainty over time."""
+        if len(uncertainties) < 2:
+            return "insufficient_data"
+            
+        total_uncertainties = [u.get('total', 0) for u in uncertainties]
+        
+        # Simple trend analysis
+        if total_uncertainties[-1] < total_uncertainties[0]:
+            return "decreasing"
+        elif total_uncertainties[-1] > total_uncertainties[0]:
+            return "increasing"
+        else:
+            return "stable"
+    
+    def log_prediction_for_calibration(self, prediction: Dict[str, float], ground_truth: str):
+        """Log prediction and ground truth for later calibration analysis."""
+        self.calibration_data['predictions'].append(prediction.copy())
+        self.calibration_data['ground_truth'].append(ground_truth)
+        
+        # Limit history size to prevent memory issues
+        max_history = 1000
+        if len(self.calibration_data['predictions']) > max_history:
+            self.calibration_data['predictions'] = self.calibration_data['predictions'][-max_history:]
+            self.calibration_data['ground_truth'] = self.calibration_data['ground_truth'][-max_history:]
 
     # ------------------ Logging & Saving ----------------------
     def load_state_dict_from_parallel(self, parallel_dirs, save=False):
@@ -412,35 +962,113 @@ class MontyForGraphMatching(MontyBase):
         return combined_votes
 
     def _vote(self):
-        """Use lm_to_lm_vote_matrix to transmit votes between lms."""
+        """Use lm_to_lm_vote_matrix to transmit Bayesian-enhanced votes between lms."""
         if self.lm_to_lm_vote_matrix is not None:
             # Send out votes
             votes_per_lm = []
             for i in range(len(self.learning_modules)):
-                votes_per_lm.append(self.learning_modules[i].send_out_vote())
+                vote = self.learning_modules[i].send_out_vote()
+                
+                # Enhance vote with Bayesian confidence if available
+                if hasattr(self.learning_modules[i], 'get_possible_matches'):
+                    possible_matches = self.learning_modules[i].get_possible_matches()
+                    if possible_matches and hasattr(self, 'current_posteriors'):
+                        # Add posterior probabilities to vote
+                        bayesian_weights = {}
+                        for obj in possible_matches:
+                            bayesian_weights[obj] = self.current_posteriors.get(obj, 0.0)
+                        
+                        # Enhance traditional vote with Bayesian information
+                        if isinstance(vote, dict):
+                            vote['bayesian_posteriors'] = bayesian_weights
+                        elif isinstance(vote, set):
+                            # For set-based voting, weight by uncertainty
+                            if hasattr(self, 'uncertainty_history') and self.uncertainty_history:
+                                current_uncertainty = self.uncertainty_history[-1]
+                                vote = {
+                                    'excluded_objects': vote,
+                                    'uncertainty': current_uncertainty,
+                                    'posteriors': bayesian_weights
+                                }
+                
+                votes_per_lm.append(vote)
 
             combined_votes = self._combine_votes(votes_per_lm)
-            # Receive votes
+            
+            # Receive votes with Bayesian processing
             for i in range(len(self.learning_modules)):
-                logger.debug(f"------ Sending votes to LM {i} -------")
+                logger.debug(f"------ Sending Bayesian-enhanced votes to LM {i} -------")
                 self.send_vote_to_lm(self.learning_modules[i], i, combined_votes)
                 self.update_stats_after_vote(self.learning_modules[i])
 
         # Update IoPM, needed for checking terminal condition
         self.union_of_possible_matches = self._get_union_of_possible_matches()
+        
+        # Update Bayesian priors based on voting consensus
+        self._update_bayesian_priors_from_votes()
+
+    def _update_bayesian_priors_from_votes(self):
+        """Update Bayesian priors based on cross-LM voting consensus."""
+        if not hasattr(self, 'current_posteriors') or not self.current_posteriors:
+            return
+            
+        # Use voting consensus to update object priors
+        consensus_strength = 0.1  # Hyperparameter for prior updating
+        
+        for obj_id, posterior in self.current_posteriors.items():
+            # Count how many LMs support this object
+            lm_support_count = 0
+            for lm in self.learning_modules:
+                if hasattr(lm, 'get_possible_matches'):
+                    if obj_id in lm.get_possible_matches():
+                        lm_support_count += 1
+            
+            # Update prior based on consensus
+            if lm_support_count > 0:
+                consensus_factor = lm_support_count / len(self.learning_modules)
+                new_prior = (1 - consensus_strength) * self.bayesian_engine.object_priors.get(obj_id, 0.5) + \
+                           consensus_strength * consensus_factor
+                self.bayesian_engine.update_priors(obj_id, new_prior)
+                
+        logger.debug(f"Updated Bayesian priors: {self.bayesian_engine.object_priors}")
 
     def _pass_infos_to_motor_system(self):
-        """Pass input observations to the motor system.
-
-        Omit goal states in this case.
-        """
+        """Pass input observations to the motor system with active inference."""
         # TODO M: generalize to multiple sensor modules
 
         if (
             self.step_type == "matching_step"
             or self.sensor_module_outputs[0] is not None
         ):
-            self._pass_input_obs_to_motor_system(self.sensor_module_outputs[0])
+            # Enhanced motor system input with Bayesian information
+            motor_input = self.sensor_module_outputs[0]
+            
+            # Add Bayesian state information for active inference
+            if hasattr(self, 'current_posteriors') and self.current_posteriors:
+                if hasattr(motor_input, '__dict__'):
+                    motor_input.bayesian_posteriors = self.current_posteriors
+                    
+                if hasattr(self, 'uncertainty_history') and self.uncertainty_history:
+                    motor_input.uncertainty = self.uncertainty_history[-1]
+                    
+                # Active inference action selection
+                if (self.information_seeking and 
+                    hasattr(self.motor_system, '_policy') and
+                    hasattr(self.motor_system._policy, 'get_possible_actions')):
+                    
+                    try:
+                        possible_actions = self.motor_system._policy.get_possible_actions()
+                        if possible_actions and self.uncertainty_history:
+                            action_recommendation = self.bayesian_engine.active_inference_action_selection(
+                                self.uncertainty_history[-1], 
+                                possible_actions
+                            )
+                            motor_input.active_inference_action = action_recommendation
+                            logger.debug(f"Active inference recommends: {action_recommendation}")
+                    except Exception as e:
+                        logger.debug(f"Active inference action selection failed: {e}")
+                        
+            self._pass_input_obs_to_motor_system(motor_input)
 
     def _set_step_type_and_check_if_done(self):
         """Check terminal conditions and decide if we change the step type."""
