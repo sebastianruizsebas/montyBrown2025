@@ -87,8 +87,12 @@ class UnsupervisedInferenceExperiments:
 
 @dataclass
 class MyExperiments:
+<<<<<<< HEAD
     # Add your experiment names here
     pass
+=======
+    dist_agent_2lm_stack_eval: dict
+>>>>>>> e7c7c19 (Ran experiments for poster)
 
 
 current_module = sys.modules[__name__]
