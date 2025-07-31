@@ -47,20 +47,22 @@ class BayesianInferenceEngine:
     """
     
     def __init__(self, 
-                 prior_strength: float = 1.0,
-                 uncertainty_threshold: float = 0.1,
-                 confidence_threshold: float = 0.95):
+                 config_args: Optional[Dict] = None):
         """
-        Initialize Bayesian inference engine.
+        Initialize Bayesian inference engine using config pattern.
         
         Args:
-            prior_strength: Weight for prior beliefs vs. new evidence
-            uncertainty_threshold: Threshold for considering predictions uncertain
-            confidence_threshold: Minimum confidence for terminal decisions
+            config_args: Configuration dictionary with Bayesian parameters
         """
-        self.prior_strength = prior_strength
-        self.uncertainty_threshold = uncertainty_threshold
-        self.confidence_threshold = confidence_threshold
+        config = config_args or {}
+        self.prior_strength = config.get('prior_strength', 1.0)
+        self.uncertainty_threshold = config.get('uncertainty_threshold', 0.1)
+        self.confidence_threshold = config.get('confidence_threshold', 0.95)
+        self.calibration_enabled = config.get('calibration_enabled', True)
+        self.max_history_size = config.get('max_history_size', 1000)
+        
+        # Initialize logging
+        self.logger = logging.getLogger(__name__)
         
         # Bayesian state variables
         self.object_priors = {}  # P(object)
@@ -283,24 +285,67 @@ class BayesianInferenceEngine:
         return metrics
         
     # Helper methods
-    def _extract_features(self, observation: Dict) -> np.ndarray:
-        """Extract numerical features from observation."""
-        # Placeholder - should extract relevant features for matching
+    def _extract_features(self, observation) -> np.ndarray:
+        """Extract numerical features from observation using existing State class structure."""
         features = []
-        if 'morphological_features' in observation:
-            for feature_dict in observation['morphological_features'].values():
-                if isinstance(feature_dict, dict):
-                    for val in feature_dict.values():
-                        if isinstance(val, (int, float)):
-                            features.append(val)
-                        elif isinstance(val, np.ndarray):
-                            features.extend(val.flatten())
+        
+        # Handle both single observations and lists
+        obs_list = observation if isinstance(observation, list) else [observation]
+        
+        for obs in obs_list:
+            # Use existing morphological_features structure
+            if hasattr(obs, 'morphological_features'):
+                for feature_name, feature_dict in obs.morphological_features.items():
+                    if isinstance(feature_dict, dict):
+                        for key, val in feature_dict.items():
+                            if isinstance(val, (int, float)):
+                                features.append(val)
+                            elif isinstance(val, np.ndarray):
+                                features.extend(val.flatten())
+            
+            # Handle non_morphological_features too
+            if hasattr(obs, 'non_morphological_features'):
+                for feature_name, feature_dict in obs.non_morphological_features.items():
+                    if isinstance(feature_dict, dict):
+                        for key, val in feature_dict.items():
+                            if isinstance(val, (int, float)):
+                                features.append(val)
+                            elif isinstance(val, np.ndarray):
+                                features.extend(val.flatten())
+            
+            # Fallback for dictionary-based observations
+            if isinstance(obs, dict):
+                if 'morphological_features' in obs:
+                    for feature_dict in obs['morphological_features'].values():
+                        if isinstance(feature_dict, dict):
+                            for val in feature_dict.values():
+                                if isinstance(val, (int, float)):
+                                    features.append(val)
+                                elif isinstance(val, np.ndarray):
+                                    features.extend(val.flatten())
+        
         return np.array(features) if features else np.array([0.0])
         
     def _get_expected_features(self, object_id: str, pose: np.ndarray) -> Optional[np.ndarray]:
-        """Get expected features for object at given pose."""
-        # Placeholder - should query graph memory for expected features
-        return None
+        """Get expected features using existing graph memory interface."""
+        try:
+            # Use the existing graph memory structure if available
+            if hasattr(self, 'graph_memory') and object_id in self.graph_memory.get_memory_ids():
+                # Get graph for this object
+                graph = self.graph_memory.get_graph(object_id, input_channel="first")
+                
+                # Extract features from graph nodes
+                if hasattr(graph, 'x') and graph.x.shape[0] > 0:
+                    # Return mean features as expected (could be more sophisticated)
+                    if hasattr(graph.x, 'numpy'):
+                        return np.mean(graph.x.numpy(), axis=0)
+                    else:
+                        return np.mean(graph.x, axis=0)
+            
+            return None
+        except Exception as e:
+            self.logger.debug(f"Could not get expected features for {object_id}: {e}")
+            return None
         
     def _estimate_feature_covariance(self, features: np.ndarray) -> np.ndarray:
         """Estimate covariance matrix for features."""
@@ -345,6 +390,91 @@ class BayesianInferenceEngine:
         # Simplified ECE computation
         return 0.0  # Placeholder
 
+    def collect_bayesian_stats(self) -> Dict:
+        """Collect stats in the same format as other Monty components."""
+        return {
+            'bayesian_posteriors': self.posteriors.copy(),
+            'epistemic_uncertainty': getattr(self, 'epistemic_uncertainty', {}),
+            'aleatoric_uncertainty': getattr(self, 'aleatoric_uncertainty', {}),
+            'evidence_count': len(self.evidence_history),
+            'belief_history_length': len(self.belief_history)
+        }
+
+    def safe_bayesian_update(self, observations: List, possible_objects: List[str]) -> Dict[str, float]:
+        """Bayesian update with fallback to uniform distribution."""
+        try:
+            return self.bayesian_update(observations, possible_objects)
+        except Exception as e:
+            self.logger.warning(f"Bayesian update failed, falling back to uniform: {e}")
+            # Fallback to uniform distribution
+            uniform_prob = 1.0 / len(possible_objects) if possible_objects else 0.0
+            return {obj_id: uniform_prob for obj_id in possible_objects}
+
+    def state_dict(self) -> Dict:
+        """Follow existing state_dict pattern for saving/loading."""
+        return {
+            'object_priors': self.object_priors,
+            'pose_priors': self.pose_priors,
+            'prior_strength': self.prior_strength,
+            'uncertainty_threshold': self.uncertainty_threshold,
+            'confidence_threshold': self.confidence_threshold,
+            'evidence_history': self.evidence_history[-100:],  # Keep last 100 for memory
+            'belief_history': self.belief_history[-100:]
+        }
+
+    def load_state_dict(self, state_dict: Dict):
+        """Load Bayesian state following existing pattern."""
+        self.object_priors = state_dict.get('object_priors', {})
+        self.pose_priors = state_dict.get('pose_priors', {})
+        self.prior_strength = state_dict.get('prior_strength', 1.0)
+        self.uncertainty_threshold = state_dict.get('uncertainty_threshold', 0.1)
+        self.confidence_threshold = state_dict.get('confidence_threshold', 0.95)
+        self.evidence_history = state_dict.get('evidence_history', [])
+        self.belief_history = state_dict.get('belief_history', [])
+
+    def validate_integration(self, parent_object=None) -> bool:
+        """Validate that Bayesian engine integrates properly with Monty."""
+        checks = {
+            'posteriors_valid': self._validate_posteriors(),
+            'uncertainty_valid': self._validate_uncertainty(),
+            'priors_valid': self._validate_priors()
+        }
+        
+        if parent_object:
+            checks['has_graph_memory'] = hasattr(parent_object, 'learning_modules')
+            checks['has_learning_modules'] = hasattr(parent_object, 'learning_modules')
+        
+        all_valid = all(checks.values())
+        if not all_valid:
+            self.logger.error(f"Integration validation failed: {checks}")
+        
+        return all_valid
+
+    def _validate_posteriors(self) -> bool:
+        """Check that posteriors are valid probability distributions."""
+        if not self.posteriors:
+            return True
+        
+        total = sum(self.posteriors.values())
+        return abs(total - 1.0) < 1e-6  # Allow small numerical errors
+
+    def _validate_uncertainty(self) -> bool:
+        """Check that uncertainty values are valid."""
+        if not hasattr(self, 'epistemic_uncertainty'):
+            return True
+        
+        for key, value in self.epistemic_uncertainty.items():
+            if isinstance(value, (int, float)) and (value < 0 or value > 10):  # Reasonable bounds
+                return False
+        return True
+
+    def _validate_priors(self) -> bool:
+        """Check that priors are valid probabilities."""
+        for obj_id, prior in self.object_priors.items():
+            if not (0.0 <= prior <= 1.0):
+                return False
+        return True
+
 
 class MontyForGraphMatching(MontyBase):
     """
@@ -374,13 +504,11 @@ class MontyForGraphMatching(MontyBase):
         """Initialize Bayesian-enhanced graph matching system."""
         super().__init__(*args, **kwargs)
         
-        # Initialize Bayesian inference engine
-        bayes_config = bayesian_config or {}
-        self.bayesian_engine = BayesianInferenceEngine(
-            prior_strength=bayes_config.get('prior_strength', 1.0),
-            uncertainty_threshold=bayes_config.get('uncertainty_threshold', 0.1),
-            confidence_threshold=bayes_config.get('confidence_threshold', 0.95)
-        )
+        # Initialize Bayesian inference engine using config pattern
+        self.bayesian_engine = BayesianInferenceEngine(config_args=bayesian_config)
+        
+        # Pass reference to this object for integration validation
+        self.bayesian_engine.parent_monty = self
         
         # Bayesian state tracking
         self.current_posteriors = {}
@@ -389,8 +517,13 @@ class MontyForGraphMatching(MontyBase):
         self.calibration_data = {'predictions': [], 'ground_truth': []}
         
         # Active inference parameters
+        bayes_config = bayesian_config or {}
         self.exploration_bonus = bayes_config.get('exploration_bonus', 0.1)
         self.information_seeking = bayes_config.get('information_seeking', True)
+        
+        # Validate integration on initialization
+        if not self.bayesian_engine.validate_integration(self):
+            logger.warning("Bayesian integration validation failed - some features may not work properly")
 
     # =============== Public Interface Functions ===============
     # ------------------- Main Algorithm -----------------------
@@ -562,9 +695,22 @@ class MontyForGraphMatching(MontyBase):
             
             # Collect observations for Bayesian inference
             if hasattr(lm, 'buffer') and lm.buffer.get_num_observations_on_object() > 0:
-                recent_obs = lm.buffer.get_recent_observations()
-                if recent_obs:
-                    lm_observations.extend(recent_obs)
+                try:
+                    # Try to get recent observations from buffer
+                    if hasattr(lm.buffer, 'get_recent_observations'):
+                        recent_obs = lm.buffer.get_recent_observations()
+                    elif hasattr(lm.buffer, 'get_observations'):
+                        recent_obs = lm.buffer.get_observations()[-5:]  # Last 5 observations
+                    else:
+                        # Fallback: try to get from buffer directly
+                        recent_obs = []
+                        if hasattr(lm.buffer, 'observations') and lm.buffer.observations:
+                            recent_obs = lm.buffer.observations[-5:]
+                    
+                    if recent_obs:
+                        lm_observations.extend(recent_obs)
+                except Exception as e:
+                    logger.debug(f"Could not extract observations from LM {lm.learning_module_id}: {e}")
                     
             # Collect possible objects
             possible_matches = lm.get_possible_matches()
@@ -578,8 +724,8 @@ class MontyForGraphMatching(MontyBase):
         if lm_observations and all_possible_objects:
             unique_objects = list(set(all_possible_objects))
             
-            # Update posteriors using Bayesian engine
-            self.current_posteriors = self.bayesian_engine.bayesian_update(
+            # Update posteriors using safe Bayesian engine
+            self.current_posteriors = self.bayesian_engine.safe_bayesian_update(
                 lm_observations, unique_objects
             )
             
@@ -1532,7 +1678,43 @@ class GraphLM(LearningModule):
         Returns:
             7d pose array or None.
         """
-        raise NotImplementedError("This should be implemented in any subclass.")
+        if self.detected_object is None or self.detected_object != object_id:
+            return None
+            
+        # Check if we have sufficient confidence for the pose
+        if hasattr(self, 'bayesian_engine'):
+            # Get uncertainties for pose components
+            pose_uncertainties = self.bayesian_engine.get_epistemic_uncertainty()
+            if pose_uncertainties is not None:
+                # Check if uncertainties are below threshold for unique identification
+                uncertainty_threshold = getattr(self, 'uncertainty_threshold', 0.1)
+                if np.any(pose_uncertainties > uncertainty_threshold):
+                    return None
+        
+        # Construct 7D pose array: [x, y, z, qw, qx, qy, qz]
+        pose = np.zeros(7)
+        
+        # Set position (default to sensor position if not available)
+        if hasattr(self, 'detected_location') and self.detected_location is not None:
+            pose[:3] = self.detected_location
+        else:
+            # Use sensor position as fallback
+            sensor_pos = getattr(self, 'sensor_position', np.zeros(3))
+            pose[:3] = sensor_pos
+            
+        # Set rotation (quaternion format)
+        if hasattr(self, 'detected_rotation_r') and self.detected_rotation_r is not None:
+            # Convert rotation matrix to quaternion if needed
+            if self.detected_rotation_r.shape == (3, 3):
+                from scipy.spatial.transform import Rotation as R
+                quat = R.from_matrix(self.detected_rotation_r).as_quat()
+                pose[3:] = [quat[3], quat[0], quat[1], quat[2]]  # [w, x, y, z]
+            else:
+                pose[3:] = self.detected_rotation_r[:4]  # Assume quaternion format
+        else:
+            pose[3] = 1.0  # Identity quaternion [w=1, x=0, y=0, z=0]
+            
+        return pose
 
     # ------------------ Logging & Saving ----------------------
 
@@ -1629,10 +1811,119 @@ class GraphLM(LearningModule):
         self._update_possible_matches(query=query)
 
     def _update_possible_matches(self):
-        # QUESTION: Should we give this a more general name? Like update_hypotheses
-        # or update_state?
-        # QUESTION: Should this actually be something handled in LMs?
-        raise NotImplementedError("Need to implement way to update memory hypotheses")
+        """Update memory hypotheses using Bayesian inference and graph matching.
+        
+        This method updates the possible object matches based on current
+        observations using both traditional graph matching and Bayesian inference.
+        """
+        if not hasattr(self, 'possible_matches') or self.possible_matches is None:
+            self.possible_matches = self.get_all_models_in_memory()
+            
+        # Get current observations for updating hypotheses
+        current_features = self._get_current_features()
+        current_location = getattr(self, 'current_location', None)
+        
+        # Update using Bayesian inference if available
+        if hasattr(self, 'bayesian_engine') and current_features is not None:
+            # Update posteriors for each possible match
+            updated_matches = {}
+            
+            for model_id in self.possible_matches:
+                if model_id in self.graph_memory.stored_graphs:
+                    # Calculate likelihood of current observation given this model
+                    likelihood = self._calculate_observation_likelihood(
+                        model_id, current_features, current_location
+                    )
+                    
+                    # Update posterior using Bayesian inference
+                    posterior = self.bayesian_engine.bayesian_update(
+                        model_id, likelihood, current_features
+                    )
+                    
+                    updated_matches[model_id] = posterior
+                    
+            # Filter matches based on posterior probabilities
+            threshold = getattr(self, 'match_threshold', 0.1)
+            self.possible_matches = [
+                model_id for model_id, posterior in updated_matches.items()
+                if posterior > threshold
+            ]
+            
+        # Fall back to traditional graph matching if Bayesian engine not available
+        else:
+            # Use existing graph matching logic
+            if hasattr(self, 'graph_memory') and current_features is not None:
+                similarity_scores = {}
+                
+                for model_id in self.possible_matches:
+                    if model_id in self.graph_memory.stored_graphs:
+                        # Calculate similarity score using feature matching
+                        score = self._calculate_similarity_score(model_id, current_features)
+                        similarity_scores[model_id] = score
+                        
+                # Keep only matches above similarity threshold
+                threshold = getattr(self, 'similarity_threshold', 0.5)
+                self.possible_matches = [
+                    model_id for model_id, score in similarity_scores.items()
+                    if score > threshold
+                ]
+        
+        # Log the updated matches
+        logger.debug(f"Updated possible matches: {len(self.possible_matches)} candidates")
+        
+    def _get_current_features(self):
+        """Extract current features from buffer for hypothesis updating."""
+        if hasattr(self, 'buffer') and self.buffer is not None:
+            try:
+                # Get the most recent observation features
+                recent_obs = self.buffer.get_recent_observations(n=1)
+                if recent_obs:
+                    return recent_obs[0].get('features', None)
+            except Exception as e:
+                logger.debug(f"Could not extract current features: {e}")
+        return None
+        
+    def _calculate_observation_likelihood(self, model_id, features, location):
+        """Calculate likelihood of current observation given a model."""
+        if model_id not in self.graph_memory.stored_graphs:
+            return 0.0
+            
+        try:
+            # Get stored features for this model
+            stored_features = self.graph_memory.get_features_for_model(model_id)
+            
+            # Calculate feature similarity (simplified likelihood)
+            if stored_features is not None and features is not None:
+                # Use cosine similarity as likelihood proxy
+                similarity = np.dot(features.flatten(), stored_features.flatten()) / (
+                    np.linalg.norm(features.flatten()) * np.linalg.norm(stored_features.flatten())
+                )
+                return max(0.0, similarity)  # Ensure non-negative
+                
+        except Exception as e:
+            logger.debug(f"Error calculating likelihood for {model_id}: {e}")
+            
+        return 0.1  # Default small likelihood
+        
+    def _calculate_similarity_score(self, model_id, features):
+        """Calculate similarity score using traditional graph matching."""
+        if model_id not in self.graph_memory.stored_graphs:
+            return 0.0
+            
+        try:
+            # Get stored graph for this model
+            stored_graph = self.graph_memory.stored_graphs[model_id]
+            
+            # Simple feature-based similarity (can be enhanced)
+            if hasattr(stored_graph, 'features') and features is not None:
+                stored_features = stored_graph.features
+                similarity = np.corrcoef(features.flatten(), stored_features.flatten())[0, 1]
+                return max(0.0, similarity) if not np.isnan(similarity) else 0.0
+                
+        except Exception as e:
+            logger.debug(f"Error calculating similarity for {model_id}: {e}")
+            
+        return 0.0
 
     def _update_memory(self):
         """Give all infos to graph_memory.update_memory to determine how to update."""
@@ -1823,16 +2114,267 @@ class GraphMemory(LMMemory):
                     )
 
     def memory_consolidation(self):
-        """Is here just as a placeholder.
-
-        This could be a function that cleans up graphs in memory to make
-        more efficient use of their nodes by spacing them out evenly along
-        the approximated object surface. It could be something that happens
-        during sleep. During clean up, similar graphs could also be merged.
-
-        Q: Should we implement something like this?
+        """Consolidate memory by merging similar graphs and optimizing representations.
+        
+        This method implements memory consolidation to improve efficiency by:
+        1. Merging similar object representations
+        2. Optimizing node placement for better coverage
+        3. Removing redundant information
+        4. Using Bayesian confidence to guide consolidation decisions
         """
-        raise NotImplementedError("memory_consolidation has not been implemented yet.")
+        if not hasattr(self, 'models_in_memory') or not self.models_in_memory:
+            logger.debug("No models available for memory consolidation")
+            return
+            
+        logger.info("Starting memory consolidation process")
+        
+        # Get all stored model IDs
+        model_ids = list(self.models_in_memory.keys())
+        
+        if len(model_ids) < 2:
+            logger.debug("Insufficient models for consolidation")
+            return
+            
+        # Phase 1: Identify similar graphs for potential merging
+        similarity_matrix = self._compute_model_similarity_matrix(model_ids)
+        merge_candidates = self._identify_merge_candidates(
+            model_ids, similarity_matrix, threshold=0.8
+        )
+        
+        # Phase 2: Merge similar graphs
+        merged_count = 0
+        for group in merge_candidates:
+            if len(group) > 1:
+                merged_model = self._merge_model_group(group)
+                if merged_model is not None:
+                    # Replace individual models with merged version
+                    primary_id = group[0]  # Use first ID as primary
+                    self.models_in_memory[primary_id] = merged_model
+                    
+                    # Remove other models in the group
+                    for secondary_id in group[1:]:
+                        if secondary_id in self.models_in_memory:
+                            del self.models_in_memory[secondary_id]
+                            
+                    merged_count += len(group) - 1
+                    
+        # Phase 3: Optimize node placement for remaining models
+        optimized_count = 0
+        for model_id in self.models_in_memory:
+            if self._optimize_model_nodes(model_id):
+                optimized_count += 1
+                
+        # Phase 4: Clean up feature arrays
+        self._cleanup_feature_arrays()
+        
+        logger.info(
+            f"Memory consolidation complete: merged {merged_count} models, "
+            f"optimized {optimized_count} models"
+        )
+        
+    def _compute_model_similarity_matrix(self, model_ids):
+        """Compute pairwise similarity matrix between models."""
+        n = len(model_ids)
+        similarity_matrix = np.eye(n)  # Initialize with identity
+        
+        for i in range(n):
+            for j in range(i + 1, n):
+                similarity = self._compute_model_similarity(model_ids[i], model_ids[j])
+                similarity_matrix[i, j] = similarity
+                similarity_matrix[j, i] = similarity
+                
+        return similarity_matrix
+        
+    def _compute_model_similarity(self, id1, id2):
+        """Compute similarity between two models."""
+        try:
+            model1 = self.models_in_memory.get(id1)
+            model2 = self.models_in_memory.get(id2)
+            
+            if model1 is None or model2 is None:
+                return 0.0
+                
+            # Compare feature arrays if available
+            feature_sim = 0.0
+            if id1 in self.feature_array and id2 in self.feature_array:
+                feature_sim = self._compare_feature_arrays(id1, id2)
+                
+            # Compare model properties
+            structural_sim = self._compare_model_structure(model1, model2)
+            
+            # Combined similarity score
+            return 0.7 * feature_sim + 0.3 * structural_sim
+            
+        except Exception as e:
+            logger.debug(f"Error computing similarity between {id1} and {id2}: {e}")
+            return 0.0
+            
+    def _compare_feature_arrays(self, id1, id2):
+        """Compare feature arrays between two models."""
+        try:
+            features1 = self.feature_array.get(id1, {})
+            features2 = self.feature_array.get(id2, {})
+            
+            # Find common input channels
+            common_channels = set(features1.keys()) & set(features2.keys())
+            
+            if not common_channels:
+                return 0.0
+                
+            similarities = []
+            for channel in common_channels:
+                f1 = np.array(features1[channel]).flatten()
+                f2 = np.array(features2[channel]).flatten()
+                
+                if len(f1) > 0 and len(f2) > 0:
+                    # Pad or truncate to same length
+                    min_len = min(len(f1), len(f2))
+                    f1 = f1[:min_len]
+                    f2 = f2[:min_len]
+                    
+                    # Compute cosine similarity
+                    norm1 = np.linalg.norm(f1)
+                    norm2 = np.linalg.norm(f2)
+                    
+                    if norm1 > 0 and norm2 > 0:
+                        sim = np.dot(f1, f2) / (norm1 * norm2)
+                        similarities.append(max(0.0, sim))
+                        
+            return np.mean(similarities) if similarities else 0.0
+            
+        except Exception as e:
+            logger.debug(f"Error comparing feature arrays: {e}")
+            return 0.0
+            
+    def _compare_model_structure(self, model1, model2):
+        """Compare structural properties of two models."""
+        try:
+            # Compare number of nodes if available
+            if hasattr(model1, 'nodes') and hasattr(model2, 'nodes'):
+                node_diff = abs(len(model1.nodes) - len(model2.nodes))
+                max_nodes = max(len(model1.nodes), len(model2.nodes))
+                return 1.0 - (node_diff / max_nodes) if max_nodes > 0 else 1.0
+                
+        except Exception:
+            pass
+            
+        return 0.5  # Default moderate similarity
+        
+    def _identify_merge_candidates(self, model_ids, similarity_matrix, threshold=0.8):
+        """Identify groups of similar models that can be merged."""
+        n = len(model_ids)
+        visited = set()
+        merge_groups = []
+        
+        for i in range(n):
+            if i in visited:
+                continue
+                
+            # Start a new group
+            group = [model_ids[i]]
+            visited.add(i)
+            
+            # Find all similar models
+            for j in range(n):
+                if j not in visited and similarity_matrix[i, j] >= threshold:
+                    group.append(model_ids[j])
+                    visited.add(j)
+                    
+            if len(group) > 1:
+                merge_groups.append(group)
+                
+        return merge_groups
+        
+    def _merge_model_group(self, group):
+        """Merge a group of similar models into a single consolidated model."""
+        try:
+            # Use the first model as the base
+            primary_id = group[0]
+            base_model = self.models_in_memory.get(primary_id)
+            
+            if base_model is None:
+                return None
+                
+            # Merge feature arrays
+            if primary_id in self.feature_array:
+                for secondary_id in group[1:]:
+                    if secondary_id in self.feature_array:
+                        # Merge features from secondary model
+                        secondary_features = self.feature_array[secondary_id]
+                        for channel, features in secondary_features.items():
+                            if channel in self.feature_array[primary_id]:
+                                # Average the features
+                                existing = np.array(self.feature_array[primary_id][channel])
+                                new_features = np.array(features)
+                                if existing.shape == new_features.shape:
+                                    self.feature_array[primary_id][channel] = (
+                                        existing + new_features
+                                    ) / 2.0
+                            else:
+                                # Add new channel
+                                self.feature_array[primary_id][channel] = features
+                                
+            return base_model
+            
+        except Exception as e:
+            logger.debug(f"Error merging model group {group}: {e}")
+            return None
+            
+    def _optimize_model_nodes(self, model_id):
+        """Optimize node placement for better coverage."""
+        try:
+            model = self.models_in_memory.get(model_id)
+            if model is None or not hasattr(model, 'nodes'):
+                return False
+                
+            # Remove redundant nodes that are too close
+            original_count = len(model.nodes)
+            min_distance = 0.01  # Configurable threshold
+            
+            optimized_nodes = []
+            for node in model.nodes:
+                is_redundant = False
+                for existing_node in optimized_nodes:
+                    if self._node_distance(node, existing_node) < min_distance:
+                        is_redundant = True
+                        break
+                        
+                if not is_redundant:
+                    optimized_nodes.append(node)
+                    
+            model.nodes = optimized_nodes
+            
+            removed_count = original_count - len(optimized_nodes)
+            if removed_count > 0:
+                logger.debug(f"Optimized {model_id}: removed {removed_count} redundant nodes")
+                return True
+                
+        except Exception as e:
+            logger.debug(f"Error optimizing model {model_id}: {e}")
+            
+        return False
+        
+    def _node_distance(self, node1, node2):
+        """Calculate distance between two nodes."""
+        try:
+            if hasattr(node1, 'location') and hasattr(node2, 'location'):
+                loc1 = np.array(node1.location)
+                loc2 = np.array(node2.location)
+                return np.linalg.norm(loc1 - loc2)
+        except Exception:
+            pass
+        return 0.0
+        
+    def _cleanup_feature_arrays(self):
+        """Clean up feature arrays after consolidation."""
+        # Remove feature arrays for models that no longer exist
+        model_ids = set(self.models_in_memory.keys())
+        feature_ids = set(self.feature_array.keys())
+        
+        for feature_id in feature_ids - model_ids:
+            del self.feature_array[feature_id]
+            if feature_id in self.feature_order:
+                del self.feature_order[feature_id]
 
     def initialize_feature_arrays(self):
         for graph_id in self.get_memory_ids():

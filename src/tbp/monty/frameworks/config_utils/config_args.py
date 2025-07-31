@@ -74,6 +74,11 @@ from tbp.monty.frameworks.models.sensor_modules import (
     HabitatDistantPatchSM,
     HabitatSurfacePatchSM,
 )
+from tbp.monty.frameworks.models.graph_matching import BayesianInferenceEngine
+from tbp.monty.frameworks.models.goal_state_generation import (
+    BayesianGraphGoalStateGenerator,
+    BayesianEvidenceGoalStateGenerator,
+)
 
 
 # -- Table of contents --
@@ -147,6 +152,46 @@ class CSVLoggingConfig(LoggingConfig):
         ]
     )
     wandb_handlers: List = field(default_factory=lambda: [])
+
+
+@dataclass
+class BayesianInferenceConfig:
+    """Configuration for Bayesian inference engine."""
+    prior_strength: float = 1.0
+    uncertainty_threshold: float = 0.1
+    confidence_threshold: float = 0.95
+    exploration_bonus: float = 0.1
+    information_seeking: bool = True
+    calibration_enabled: bool = True
+    max_history_size: int = 1000
+    use_active_inference: bool = True
+    uncertainty_weighting: float = 0.5
+    epistemic_uncertainty_weight: float = 0.7
+    aleatoric_uncertainty_weight: float = 0.3
+
+
+@dataclass
+class BayesianLoggingConfig(LoggingConfig):
+    """Enhanced logging for Bayesian experiments."""
+    monty_handlers: List = field(
+        default_factory=lambda: [
+            BasicCSVStatsHandler,
+            DetailedJSONHandler,
+            ReproduceEpisodeHandler,
+        ]
+    )
+    wandb_handlers: List = field(
+        default_factory=lambda: [
+            BasicWandbTableStatsHandler,
+            BasicWandbChartStatsHandler,
+        ]
+    )
+    # Track Bayesian-specific metrics
+    log_uncertainty_metrics: bool = True
+    log_calibration_data: bool = True
+    log_information_gain: bool = True
+    uncertainty_log_frequency: int = 10  # Log every N steps
+    calibration_log_frequency: int = 50  # Log calibration every N steps
 
 
 @dataclass
@@ -541,6 +586,18 @@ class MontyFeatureGraphArgs(MontyArgs):
     min_eval_steps: int = 3
     min_train_steps: int = 3
     max_total_steps: int = 2_500
+
+
+@dataclass
+class BayesianMontyArgs(MontyArgs):
+    """Extended Monty args with Bayesian-specific parameters."""
+    uncertainty_convergence_threshold: float = 0.05
+    min_confidence_for_decision: float = 0.8
+    max_uncertainty_steps: int = 500
+    bayesian_voting_enabled: bool = True
+    active_inference_enabled: bool = True
+    use_uncertainty_based_termination: bool = True
+    calibration_frequency: int = 50
 
 
 @dataclass
@@ -1421,7 +1478,7 @@ def make_multi_lm_monty_config(
                         "hsv": np.array([1, 0.5, 0.5]),
                     }
                 }
-            }
+            )
             ```
           When we are constructing the config for learning module **i**, that entry
           for `"patch"` will be replaced with `"patch_{i}"`. This is currently
@@ -1587,3 +1644,206 @@ def get_cube_face_and_corner_views_rotations() -> List[np.ndarray]:
         np.array([35, 225, 0]),
         np.array([325, 225, 0]),
     ]
+
+
+@dataclass
+class BayesianInferenceConfig:
+    """Configuration for Bayesian inference engine."""
+    prior_strength: float = 1.0
+    uncertainty_threshold: float = 0.1
+    confidence_threshold: float = 0.95
+    exploration_bonus: float = 0.1
+    information_seeking: bool = True
+    calibration_enabled: bool = True
+    max_history_size: int = 1000
+    use_active_inference: bool = True
+    uncertainty_weighting: float = 0.5
+
+@dataclass
+class BayesianLoggingConfig(LoggingConfig):
+    """Enhanced logging for Bayesian experiments."""
+    monty_handlers: List = field(
+        default_factory=lambda: [
+            BasicCSVStatsHandler,
+            DetailedJSONHandler,
+            ReproduceEpisodeHandler,
+        ]
+    )
+    wandb_handlers: List = field(
+        default_factory=lambda: [
+            BasicWandbTableStatsHandler,
+            BasicWandbChartStatsHandler,
+        ]
+    )
+    # Track Bayesian-specific metrics
+    log_uncertainty_metrics: bool = True
+    log_calibration_data: bool = True
+    uncertainty_log_frequency: int = 10  # Log every N steps
+
+@dataclass 
+class BayesianMotorSystemConfig(MotorSystemConfigInformedGoalStateDriven):
+    """Motor system config that incorporates Bayesian uncertainty for action selection."""
+    motor_system_args: Union[Dict, Dataclass] = field(
+        default_factory=lambda: dict(
+            policy_class=InformedPolicy,
+            policy_args=make_informed_policy_config(
+                action_space_type="distant_agent_no_translation",
+                action_sampler_class=ConstantSampler,
+                rotation_degrees=5.0,
+                use_goal_state_driven_actions=True,
+                use_uncertainty_driven_actions=True,  # New parameter
+                uncertainty_exploration_bonus=0.1,
+                goal_state_generator_class=BayesianGraphGoalStateGenerator,
+                goal_state_generator_args=dict(
+                    uncertainty_threshold=0.1,
+                    information_gain_weight=0.3,
+                    exploration_bonus=0.2,
+                    confidence_threshold=0.8,
+                ),
+            ),
+        )
+    )
+
+
+@dataclass
+class BayesianEvidenceMotorSystemConfig(MotorSystemConfigInformedGoalStateDriven):
+    """Motor system config for Bayesian evidence-based exploration."""
+    motor_system_args: Union[Dict, Dataclass] = field(
+        default_factory=lambda: dict(
+            policy_class=InformedPolicy,
+            policy_args=make_informed_policy_config(
+                action_space_type="distant_agent_no_translation",
+                action_sampler_class=ConstantSampler,
+                rotation_degrees=5.0,
+                use_goal_state_driven_actions=True,
+                use_uncertainty_driven_actions=True,
+                uncertainty_exploration_bonus=0.15,
+                goal_state_generator_class=BayesianEvidenceGoalStateGenerator,
+                goal_state_generator_args=dict(
+                    uncertainty_threshold=0.15,
+                    information_gain_weight=0.4,
+                    bayesian_evidence_weight=0.3,
+                    elapsed_steps_factor=10,
+                    min_post_goal_success_steps=5,
+                ),
+            ),
+        )
+    )
+
+@dataclass
+class BayesianTwoLMStackedMontyConfig(TwoLMStackedMontyConfig):
+    """Two-LM stacked config with Bayesian inference capabilities."""
+    monty_class: Callable = MontyForGraphMatching
+    learning_module_configs: Union[dataclass, Dict] = field(
+        default_factory=lambda: dict(
+            learning_module_0=dict(
+                learning_module_class=DisplacementGraphLM,
+                learning_module_args=dict(
+                    k=5, 
+                    match_attribute="displacement",
+                    bayesian_config=BayesianInferenceConfig(),
+                    use_bayesian_inference=True,
+                ),
+            ),
+            learning_module_1=dict(
+                learning_module_class=DisplacementGraphLM,
+                learning_module_args=dict(
+                    k=5, 
+                    match_attribute="displacement",
+                    bayesian_config=BayesianInferenceConfig(),
+                    use_bayesian_inference=True,
+                ),
+            ),
+        )
+    )
+    motor_system_config: Union[dataclass, Dict] = field(
+        default_factory=BayesianMotorSystemConfig
+    )
+    # Enhanced Monty args with Bayesian parameters
+    monty_args: Union[Dict, dataclass] = field(
+        default_factory=lambda: MontyArgs(
+            num_exploratory_steps=1000,
+            min_eval_steps=5,  # Slightly higher for better Bayesian convergence
+            uncertainty_convergence_threshold=0.05,  # New parameter
+        )
+    )
+
+@dataclass
+class BayesianMontyArgs(MontyArgs):
+    """Extended Monty args with Bayesian-specific parameters."""
+    uncertainty_convergence_threshold: float = 0.05
+    min_confidence_for_decision: float = 0.8
+    max_uncertainty_steps: int = 500
+    bayesian_voting_enabled: bool = True
+    active_inference_enabled: bool = True
+    
+@dataclass
+class BayesianFiveLMMontyConfig(FiveLMMontyConfig):
+    """Five-LM config with Bayesian enhancements."""
+    monty_class: Callable = MontyForGraphMatching
+    learning_module_configs: Union[dataclass, Dict] = field(
+        default_factory=lambda: {
+            f"learning_module_{i}": dict(
+                learning_module_class=DisplacementGraphLM,
+                learning_module_args=dict(
+                    k=5, 
+                    match_attribute="displacement",
+                    bayesian_config=BayesianInferenceConfig(
+                        prior_strength=1.0 / 5,  # Distribute prior across LMs
+                        uncertainty_threshold=0.1,
+                    ),
+                    use_bayesian_inference=True,
+                ),
+            ) for i in range(5)
+        }
+    )
+    motor_system_config: Union[dataclass, Dict] = field(
+        default_factory=BayesianMotorSystemConfig
+    )
+    monty_args: Union[Dict, dataclass] = field(default_factory=BayesianMontyArgs)
+
+
+@dataclass
+class BayesianEvidenceMontyConfig(TwoLMStackedEvidenceMontyConfig):
+    """Evidence-based config enhanced with Bayesian capabilities."""
+    learning_module_configs: Union[dataclass, Dict] = field(
+        default_factory=lambda: dict(
+            learning_module_0=dict(
+                learning_module_class=EvidenceGraphLM,
+                learning_module_args=dict(
+                    k=5,
+                    match_attribute="displacement",
+                    bayesian_config=BayesianInferenceConfig(),
+                    use_bayesian_inference=True,
+                    goal_state_generator_class=BayesianEvidenceGoalStateGenerator,
+                    goal_state_generator_args=dict(
+                        uncertainty_threshold=0.15,
+                        information_gain_weight=0.4,
+                        bayesian_evidence_weight=0.3,
+                    ),
+                ),
+            ),
+            learning_module_1=dict(
+                learning_module_class=EvidenceGraphLM,
+                learning_module_args=dict(
+                    k=5,
+                    match_attribute="displacement", 
+                    bayesian_config=BayesianInferenceConfig(),
+                    use_bayesian_inference=True,
+                    goal_state_generator_class=BayesianEvidenceGoalStateGenerator,
+                    goal_state_generator_args=dict(
+                        uncertainty_threshold=0.15,
+                        information_gain_weight=0.4,
+                        bayesian_evidence_weight=0.3,
+                    ),
+                ),
+            ),
+        )
+    )
+    motor_system_config: Union[dataclass, Dict] = field(
+        default_factory=BayesianEvidenceMotorSystemConfig
+    )
+    logging_config: Union[dataclass, Dict] = field(
+        default_factory=BayesianLoggingConfig
+    )
+    monty_args: Union[Dict, dataclass] = field(default_factory=BayesianMontyArgs)

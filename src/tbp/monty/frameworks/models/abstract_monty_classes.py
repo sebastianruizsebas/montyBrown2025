@@ -9,6 +9,7 @@
 # https://opensource.org/licenses/MIT.
 
 import abc
+from typing import Dict, Optional, Any
 
 
 class Monty(metaclass=abc.ABCMeta):
@@ -136,6 +137,34 @@ class Monty(metaclass=abc.ABCMeta):
         """Return bool to tell the experiment if we are done with this episode."""
         pass
 
+    # New Bayesian-specific abstract methods
+    @abc.abstractmethod
+    def get_bayesian_state(self) -> Dict[str, Any]:
+        """Return current Bayesian state across all learning modules.
+
+        Returns:
+            Dictionary containing posteriors, uncertainties, and confidence metrics.
+        """
+        pass
+
+    @abc.abstractmethod
+    def update_bayesian_priors(self, prior_updates: Dict[str, float]):
+        """Update prior probabilities based on new evidence or meta-learning.
+
+        Args:
+            prior_updates: Dictionary mapping object_id to new prior probability.
+        """
+        pass
+
+    @abc.abstractmethod
+    def get_uncertainty_metrics(self) -> Dict[str, float]:
+        """Get current uncertainty quantification metrics.
+
+        Returns:
+            Dictionary with epistemic, aleatoric, and total uncertainty measures.
+        """
+        pass
+
 
 class LearningModule(metaclass=abc.ABCMeta):
     ###
@@ -210,6 +239,38 @@ class LearningModule(metaclass=abc.ABCMeta):
     @abc.abstractmethod
     def load_state_dict(self, state_dict):
         """Take a state dict as an argument and set state for this LM."""
+        pass
+
+    # New Bayesian-specific abstract methods
+    @abc.abstractmethod
+    def bayesian_update(self, observations: list, possible_objects: list) -> Dict[str, float]:
+        """Perform Bayesian belief update given new observations.
+
+        Args:
+            observations: List of new sensory observations.
+            possible_objects: List of possible object identifiers.
+
+        Returns:
+            Updated posterior probabilities for each possible object.
+        """
+        pass
+
+    @abc.abstractmethod
+    def get_uncertainty_estimate(self) -> Dict[str, float]:
+        """Get current uncertainty estimates.
+
+        Returns:
+            Dictionary with epistemic and aleatoric uncertainty estimates.
+        """
+        pass
+
+    @abc.abstractmethod
+    def send_bayesian_vote(self) -> Dict[str, Any]:
+        """Send Bayesian voting information to other learning modules.
+
+        Returns:
+            Dictionary containing
+        """
         pass
 
 

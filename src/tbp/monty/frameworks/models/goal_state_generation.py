@@ -11,12 +11,538 @@
 import logging
 
 import numpy as np
+from scipy.spatial.transform import Rotation as R
+from typing import Dict, List, Optional, Any, Tuple
 
 from tbp.monty.frameworks.models.abstract_monty_classes import GoalStateGenerator
 from tbp.monty.frameworks.models.states import GoalState
 from tbp.monty.frameworks.utils.communication_utils import get_state_from_channel
 
 logger = logging.getLogger(__name__)
+
+
+class BayesianGraphGoalStateGenerator(GraphGoalStateGenerator):
+    """Bayesian-enhanced goal state generator for active inference.
+    
+    This class extends the base GraphGoalStateGenerator with Bayesian capabilities
+    for uncertainty-driven exploration and information-seeking behavior. It uses
+    uncertainty estimates to guide goal state generation for more efficient learning.
+    """
+
+    def __init__(
+        self, 
+        parent_lm, 
+        goal_tolerances=None, 
+        uncertainty_threshold=0.1,
+        information_gain_weight=0.3,
+        exploration_bonus=0.2,
+        confidence_threshold=0.8,
+        **kwargs
+    ) -> None:
+        """Initialize the Bayesian GSG.
+
+        Args:
+            parent_lm: The learning module that this GSG is embedded within.
+            goal_tolerances: Tolerances for goal state achievement evaluation.
+            uncertainty_threshold: Threshold for considering uncertainty high enough
+                to warrant information-seeking behavior.
+            information_gain_weight: Weight for information gain in goal selection.
+            exploration_bonus: Bonus factor for exploring uncertain regions.
+            confidence_threshold: Minimum confidence required for goal achievement.
+            **kwargs: Additional keyword arguments.
+        """
+        super().__init__(parent_lm, goal_tolerances, **kwargs)
+        
+        self.uncertainty_threshold = uncertainty_threshold
+        self.information_gain_weight = information_gain_weight
+        self.exploration_bonus = exploration_bonus
+        self.confidence_threshold = confidence_threshold
+        
+        # Bayesian-specific state tracking
+        self.uncertainty_history = []
+        self.information_gain_history = []
+        self.last_bayesian_update_step = 0
+        
+    def reset(self):
+        """Reset Bayesian-specific attributes in addition to base reset."""
+        super().reset()
+        self.uncertainty_history = []
+        self.information_gain_history = []
+        self.last_bayesian_update_step = 0
+
+    def _generate_goal_state(self, observations):
+        """Generate uncertainty-driven goal states using Bayesian inference.
+
+        This method uses uncertainty estimates from the parent LM to generate
+        goal states that maximize expected information gain.
+
+        Args:
+            observations: Current observations from sensors.
+
+        Returns:
+            A goal state optimized for information gathering, or None if no
+            informative goal can be generated.
+        """
+        # Check if parent LM has Bayesian capabilities
+        if not hasattr(self.parent_lm, 'bayesian_engine'):
+            logger.debug("Parent LM has no Bayesian engine, falling back to base method")
+            return super()._generate_goal_state(observations)
+            
+        # Get current uncertainty estimates
+        uncertainty_metrics = self._get_uncertainty_metrics()
+        
+        if uncertainty_metrics is None:
+            return self._generate_none_goal_state()
+            
+        # Determine if uncertainty is high enough to warrant active exploration
+        if self._should_seek_information(uncertainty_metrics):
+            return self._generate_information_seeking_goal(observations, uncertainty_metrics)
+        else:
+            return self._generate_confidence_based_goal(observations, uncertainty_metrics)
+
+    def _get_uncertainty_metrics(self) -> Optional[Dict[str, float]]:
+        """Get uncertainty metrics from the parent learning module.
+        
+        Returns:
+            Dictionary containing epistemic, aleatoric, and total uncertainty,
+            or None if unavailable.
+        """
+        try:
+            if hasattr(self.parent_lm, 'bayesian_engine'):
+                epistemic = self.parent_lm.bayesian_engine.get_epistemic_uncertainty()
+                aleatoric = self.parent_lm.bayesian_engine.get_aleatoric_uncertainty()
+                
+                if epistemic is not None and aleatoric is not None:
+                    total_uncertainty = epistemic + aleatoric
+                    
+                    return {
+                        'epistemic': np.mean(epistemic) if isinstance(epistemic, np.ndarray) else epistemic,
+                        'aleatoric': np.mean(aleatoric) if isinstance(aleatoric, np.ndarray) else aleatoric,
+                        'total': np.mean(total_uncertainty) if isinstance(total_uncertainty, np.ndarray) else total_uncertainty
+                    }
+                    
+        except Exception as e:
+            logger.debug(f"Could not get uncertainty metrics: {e}")
+            
+        return None
+
+    def _should_seek_information(self, uncertainty_metrics: Dict[str, float]) -> bool:
+        """Determine if current uncertainty warrants information-seeking behavior.
+        
+        Args:
+            uncertainty_metrics: Dictionary of uncertainty values.
+            
+        Returns:
+            True if information seeking is recommended, False otherwise.
+        """
+        # High epistemic uncertainty suggests we need more data about the model
+        epistemic_high = uncertainty_metrics['epistemic'] > self.uncertainty_threshold
+        
+        # Consider exploration bonus for areas we haven't visited recently
+        steps_since_update = (
+            self.parent_lm.buffer.get_num_matching_steps() - self.last_bayesian_update_step
+        )
+        exploration_bonus_active = steps_since_update > 10  # Configurable threshold
+        
+        return epistemic_high or exploration_bonus_active
+
+    def _generate_information_seeking_goal(
+        self, 
+        observations, 
+        uncertainty_metrics: Dict[str, float]
+    ) -> Optional[GoalState]:
+        """Generate a goal state that maximizes expected information gain.
+        
+        Args:
+            observations: Current sensor observations.
+            uncertainty_metrics: Current uncertainty estimates.
+            
+        Returns:
+            Goal state for information-seeking exploration.
+        """
+        try:
+            # Get current sensor state
+            sensor_channel = self.parent_lm.buffer.get_first_sensory_input_channel()
+            current_state = get_state_from_channel(observations, sensor_channel)
+            
+            if current_state is None or current_state.location is None:
+                return self._generate_none_goal_state()
+                
+            # Generate candidate locations based on uncertainty
+            candidate_locations = self._generate_candidate_locations(
+                current_state.location, uncertainty_metrics
+            )
+            
+            # Select location with highest expected information gain
+            best_location = self._select_max_information_gain_location(
+                candidate_locations, uncertainty_metrics
+            )
+            
+            if best_location is None:
+                return self._generate_none_goal_state()
+                
+            # Create goal state for the selected location
+            goal_confidence = self._compute_information_seeking_confidence(uncertainty_metrics)
+            
+            # Generate exploration direction (pointing away from surface)
+            exploration_direction = self._compute_exploration_direction(current_state)
+            
+            goal_state = GoalState(
+                location=best_location,
+                morphological_features={
+                    "pose_vectors": np.array([
+                        exploration_direction,
+                        [np.nan, np.nan, np.nan],  # Don't constrain other orientations
+                        [np.nan, np.nan, np.nan],
+                    ]),
+                    "pose_fully_defined": False,
+                    "on_object": 1,
+                },
+                non_morphological_features={
+                    "exploration_type": "uncertainty_driven",
+                    "expected_information_gain": uncertainty_metrics['epistemic'],
+                },
+                confidence=goal_confidence,
+                use_state=True,
+                sender_id=self.parent_lm.learning_module_id,
+                sender_type="BayesianGSG",
+                goal_tolerances=self.goal_tolerances,
+                info={
+                    "uncertainty_metrics": uncertainty_metrics,
+                    "exploration_strategy": "information_seeking",
+                    "achieved": None,
+                    "matching_step_when_output_goal_set": None,
+                }
+            )
+            
+            self.last_bayesian_update_step = self.parent_lm.buffer.get_num_matching_steps()
+            return goal_state
+            
+        except Exception as e:
+            logger.debug(f"Error generating information-seeking goal: {e}")
+            return self._generate_none_goal_state()
+
+    def _generate_confidence_based_goal(
+        self, 
+        observations, 
+        uncertainty_metrics: Dict[str, float]
+    ) -> Optional[GoalState]:
+        """Generate goal state based on current confidence levels.
+        
+        When uncertainty is low, focus on refining current hypothesis or
+        moving to exploit known information.
+        
+        Args:
+            observations: Current sensor observations.
+            uncertainty_metrics: Current uncertainty estimates.
+            
+        Returns:
+            Goal state for confidence-based exploration.
+        """
+        try:
+            # Get current confidence from parent LM
+            current_output = self.parent_lm.get_output()
+            current_confidence = getattr(current_output, 'confidence', 0.0)
+            
+            # If confidence is already high, don't generate new goals frequently
+            if current_confidence > self.confidence_threshold:
+                # Occasionally generate refinement goals
+                if np.random.random() < 0.1:  # 10% chance
+                    return self._generate_refinement_goal(observations, uncertainty_metrics)
+                else:
+                    return self._generate_none_goal_state()
+            
+            # For moderate confidence, generate goals to increase certainty
+            return self._generate_certainty_increasing_goal(observations, uncertainty_metrics)
+            
+        except Exception as e:
+            logger.debug(f"Error generating confidence-based goal: {e}")
+            return self._generate_none_goal_state()
+
+    def _generate_candidate_locations(
+        self, 
+        current_location: np.ndarray, 
+        uncertainty_metrics: Dict[str, float]
+    ) -> List[np.ndarray]:
+        """Generate candidate locations for exploration based on uncertainty.
+        
+        Args:
+            current_location: Current sensor location.
+            uncertainty_metrics: Current uncertainty estimates.
+            
+        Returns:
+            List of candidate exploration locations.
+        """
+        candidates = []
+        
+        # Scale exploration radius based on uncertainty
+        base_radius = 0.05  # 5cm base exploration radius
+        uncertainty_scale = 1.0 + uncertainty_metrics['epistemic'] * 2.0
+        exploration_radius = base_radius * uncertainty_scale
+        
+        # Generate candidates in different directions
+        num_candidates = 8
+        angles = np.linspace(0, 2 * np.pi, num_candidates, endpoint=False)
+        
+        for angle in angles:
+            # Create candidate in XY plane around current location
+            offset = exploration_radius * np.array([
+                np.cos(angle), 
+                np.sin(angle), 
+                0.0
+            ])
+            candidate = current_location + offset
+            candidates.append(candidate)
+            
+        # Add some vertical exploration candidates
+        for z_offset in [-0.02, 0.02]:  # ±2cm vertical
+            vertical_candidate = current_location + np.array([0, 0, z_offset])
+            candidates.append(vertical_candidate)
+            
+        return candidates
+
+    def _select_max_information_gain_location(
+        self, 
+        candidates: List[np.ndarray], 
+        uncertainty_metrics: Dict[str, float]
+    ) -> Optional[np.ndarray]:
+        """Select candidate location with maximum expected information gain.
+        
+        Args:
+            candidates: List of candidate locations.
+            uncertainty_metrics: Current uncertainty metrics.
+            
+        Returns:
+            Location with highest expected information gain.
+        """
+        if not candidates:
+            return None
+            
+        # Simple heuristic: select location that balances distance and uncertainty
+        current_location = self.parent_lm.buffer.get_current_location()
+        
+        if current_location is None:
+            return candidates[0]  # Default to first candidate
+            
+        best_candidate = None
+        best_score = -np.inf
+        
+        for candidate in candidates:
+            # Distance factor (prefer moderate distances)
+            distance = np.linalg.norm(candidate - current_location)
+            distance_score = np.exp(-((distance - 0.03) ** 2) / 0.01)  # Peak at 3cm
+            
+            # Uncertainty factor (prefer high uncertainty areas)
+            uncertainty_score = uncertainty_metrics['epistemic']
+            
+            # Exploration bonus for areas far from recent visits
+            exploration_score = self._compute_exploration_bonus(candidate)
+            
+            # Combined score
+            total_score = (
+                distance_score + 
+                self.information_gain_weight * uncertainty_score +
+                self.exploration_bonus * exploration_score
+            )
+            
+            if total_score > best_score:
+                best_score = total_score
+                best_candidate = candidate
+                
+        return best_candidate
+
+    def _compute_exploration_bonus(self, candidate_location: np.ndarray) -> float:
+        """Compute exploration bonus for a candidate location.
+        
+        Higher bonus for locations that haven't been visited recently.
+        
+        Args:
+            candidate_location: Candidate exploration location.
+            
+        Returns:
+            Exploration bonus value.
+        """
+        try:
+            # Get recent locations from buffer
+            recent_locations = self.parent_lm.buffer.get_recent_locations(n=20)
+            
+            if not recent_locations:
+                return 1.0  # Maximum bonus for unexplored areas
+                
+            # Calculate minimum distance to recent locations
+            min_distance = float('inf')
+            for recent_loc in recent_locations:
+                if recent_loc is not None:
+                    distance = np.linalg.norm(candidate_location - recent_loc)
+                    min_distance = min(min_distance, distance)
+                    
+            # Convert distance to bonus (sigmoid function)
+            bonus = 1.0 / (1.0 + np.exp(-10 * (min_distance - 0.02)))
+            return bonus
+            
+        except Exception as e:
+            logger.debug(f"Error computing exploration bonus: {e}")
+            return 0.5  # Default moderate bonus
+
+    def _compute_exploration_direction(self, current_state) -> np.ndarray:
+        """Compute exploration direction based on current state.
+        
+        Args:
+            current_state: Current sensor state.
+            
+        Returns:
+            Unit vector indicating exploration direction.
+        """
+        try:
+            # Use surface normal if available
+            if (hasattr(current_state, 'morphological_features') and 
+                current_state.morphological_features is not None and
+                'pose_vectors' in current_state.morphological_features):
+                
+                pose_vectors = current_state.morphological_features['pose_vectors']
+                if pose_vectors is not None and len(pose_vectors) > 0:
+                    surface_normal = pose_vectors[0]
+                    if not np.any(np.isnan(surface_normal)):
+                        # Point away from surface for exploration
+                        return -surface_normal / np.linalg.norm(surface_normal)
+                        
+        except Exception as e:
+            logger.debug(f"Could not compute exploration direction: {e}")
+            
+        # Default: point upward
+        return np.array([0.0, 0.0, 1.0])
+
+    def _compute_information_seeking_confidence(
+        self, 
+        uncertainty_metrics: Dict[str, float]
+    ) -> float:
+        """Compute confidence for information-seeking goal states.
+        
+        Args:
+            uncertainty_metrics: Current uncertainty metrics.
+            
+        Returns:
+            Confidence value for the goal state.
+        """
+        # Higher uncertainty leads to higher confidence in information-seeking goals
+        base_confidence = 0.7
+        uncertainty_boost = uncertainty_metrics['epistemic'] * 0.3
+        
+        return min(1.0, base_confidence + uncertainty_boost)
+
+    def _generate_refinement_goal(
+        self, 
+        observations, 
+        uncertainty_metrics: Dict[str, float]
+    ) -> Optional[GoalState]:
+        """Generate goal for refining current high-confidence hypothesis.
+        
+        Args:
+            observations: Current observations.
+            uncertainty_metrics: Current uncertainty metrics.
+            
+        Returns:
+            Goal state for hypothesis refinement.
+        """
+        # Similar to information seeking but with smaller movements
+        sensor_channel = self.parent_lm.buffer.get_first_sensory_input_channel()
+        current_state = get_state_from_channel(observations, sensor_channel)
+        
+        if current_state is None or current_state.location is None:
+            return self._generate_none_goal_state()
+            
+        # Small refinement movement
+        refinement_offset = 0.01 * np.random.randn(3)  # 1cm random offset
+        refinement_location = current_state.location + refinement_offset
+        
+        return GoalState(
+            location=refinement_location,
+            morphological_features={
+                "pose_vectors": np.array([
+                    [0.0, 0.0, -1.0],  # Point downward for refinement
+                    [np.nan, np.nan, np.nan],
+                    [np.nan, np.nan, np.nan],
+                ]),
+                "pose_fully_defined": False,
+                "on_object": 1,
+            },
+            non_morphological_features={
+                "exploration_type": "refinement",
+            },
+            confidence=0.8,
+            use_state=True,
+            sender_id=self.parent_lm.learning_module_id,
+            sender_type="BayesianGSG",
+            goal_tolerances=self.goal_tolerances,
+            info={
+                "exploration_strategy": "refinement",
+                "achieved": None,
+                "matching_step_when_output_goal_set": None,
+            }
+        )
+
+    def _generate_certainty_increasing_goal(
+        self, 
+        observations, 
+        uncertainty_metrics: Dict[str, float]
+    ) -> Optional[GoalState]:
+        """Generate goal to increase certainty about current hypothesis.
+        
+        Args:
+            observations: Current observations.
+            uncertainty_metrics: Current uncertainty metrics.
+            
+        Returns:
+            Goal state for increasing certainty.
+        """
+        # Move to locations that should provide discriminative information
+        sensor_channel = self.parent_lm.buffer.get_first_sensory_input_channel()
+        current_state = get_state_from_channel(observations, sensor_channel)
+        
+        if current_state is None:
+            return self._generate_none_goal_state()
+            
+        # Generate goal based on current hypothesis
+        try:
+            current_output = self.parent_lm.get_output()
+            if hasattr(current_output, 'location') and current_output.location is not None:
+                # Move toward hypothesis location for validation
+                direction_to_hypothesis = current_output.location - current_state.location
+                direction_to_hypothesis = direction_to_hypothesis / np.linalg.norm(direction_to_hypothesis)
+                
+                step_size = 0.02  # 2cm step toward hypothesis
+                target_location = current_state.location + step_size * direction_to_hypothesis
+                
+                return GoalState(
+                    location=target_location,
+                    morphological_features={
+                        "pose_vectors": np.array([
+                            -direction_to_hypothesis,  # Point toward object
+                            [np.nan, np.nan, np.nan],
+                            [np.nan, np.nan, np.nan],
+                        ]),
+                        "pose_fully_defined": False,
+                        "on_object": 1,
+                    },
+                    non_morphological_features={
+                        "exploration_type": "certainty_increase",
+                    },
+                    confidence=0.6,
+                    use_state=True,
+                    sender_id=self.parent_lm.learning_module_id,
+                    sender_type="BayesianGSG",
+                    goal_tolerances=self.goal_tolerances,
+                    info={
+                        "exploration_strategy": "certainty_increase",
+                        "achieved": None,
+                        "matching_step_when_output_goal_set": None,
+                    }
+                )
+                
+        except Exception as e:
+            logger.debug(f"Error generating certainty-increasing goal: {e}")
+            
+        return self._generate_none_goal_state()
 
 
 class GraphGoalStateGenerator(GoalStateGenerator):
@@ -451,6 +977,434 @@ class GraphGoalStateGenerator(GoalStateGenerator):
                 append=True,
                 init_list=True,
             )
+
+
+class BayesianEvidenceGoalStateGenerator(BayesianGraphGoalStateGenerator):
+    """Bayesian-enhanced evidence-based goal state generator.
+    
+    Combines evidence-based hypothesis testing with Bayesian uncertainty estimates
+    for more informed goal state generation.
+    """
+
+    def __init__(
+        self,
+        parent_lm,
+        goal_tolerances=None,
+        elapsed_steps_factor=10,
+        min_post_goal_success_steps=np.inf,
+        x_percent_scale_factor=0.75,
+        desired_object_distance=0.03,
+        wait_growth_multiplier=2,
+        uncertainty_threshold=0.15,
+        information_gain_weight=0.4,
+        bayesian_evidence_weight=0.3,
+        **kwargs,
+    ) -> None:
+        """Initialize the Bayesian Evidence GSG.
+
+        Args:
+            parent_lm: Parent learning module.
+            goal_tolerances: Goal achievement tolerances.
+            elapsed_steps_factor: Factor for elapsed steps condition.
+            min_post_goal_success_steps: Minimum steps after goal success.
+            x_percent_scale_factor: Scale factor for x-percent threshold.
+            desired_object_distance: Desired distance to object.
+            wait_growth_multiplier: Multiplier for wait factor growth.
+            uncertainty_threshold: Threshold for uncertainty-driven actions.
+            information_gain_weight: Weight for information gain in decisions.
+            bayesian_evidence_weight: Weight for Bayesian evidence integration.
+            **kwargs: Additional keyword arguments.
+        """
+        super().__init__(
+            parent_lm, 
+            goal_tolerances, 
+            uncertainty_threshold=uncertainty_threshold,
+            information_gain_weight=information_gain_weight,
+            **kwargs
+        )
+
+        self.elapsed_steps_factor = elapsed_steps_factor
+        self.min_post_goal_success_steps = min_post_goal_success_steps
+        self.x_percent_scale_factor = x_percent_scale_factor
+        self.desired_object_distance = desired_object_distance
+        self.wait_growth_multiplier = wait_growth_multiplier
+        self.bayesian_evidence_weight = bayesian_evidence_weight
+
+    def reset(self):
+        """Reset additional parameters specific to the Bayesian Evidence GSG."""
+        super().reset()
+
+        self.focus_on_pose = False
+        self.wait_factor = 1
+        self.prev_top_mlhs = None
+        self.bayesian_hypothesis_history = []
+
+    def _generate_goal_state(self, observations) -> Optional[GoalState]:
+        """Generate goal state using both evidence-based and Bayesian methods.
+        
+        Integrates traditional hypothesis testing with Bayesian uncertainty
+        estimates for more informed goal generation.
+        
+        Args:
+            observations: Current sensor observations.
+            
+        Returns:
+            Goal state optimized for both evidence gathering and uncertainty reduction.
+        """
+        # First, check if we should use Bayesian uncertainty-driven exploration
+        uncertainty_metrics = self._get_uncertainty_metrics()
+        
+        if uncertainty_metrics and self._should_prioritize_uncertainty_reduction(uncertainty_metrics):
+            logger.debug("Prioritizing uncertainty reduction over evidence gathering")
+            return super()._generate_goal_state(observations)
+            
+        # Otherwise, use enhanced evidence-based approach
+        return self._generate_bayesian_evidence_goal(observations, uncertainty_metrics)
+
+    def _should_prioritize_uncertainty_reduction(self, uncertainty_metrics: Dict[str, float]) -> bool:
+        """Determine if uncertainty reduction should take priority over evidence gathering.
+        
+        Args:
+            uncertainty_metrics: Current uncertainty estimates.
+            
+        Returns:
+            True if uncertainty reduction should be prioritized.
+        """
+        # Prioritize uncertainty reduction when epistemic uncertainty is very high
+        high_epistemic = uncertainty_metrics['epistemic'] > self.uncertainty_threshold * 1.5
+        
+        # Or when we have very low confidence in current hypotheses
+        try:
+            current_output = self.parent_lm.get_output()
+            low_confidence = getattr(current_output, 'confidence', 1.0) < 0.3
+        except:
+            low_confidence = False
+            
+        return high_epistemic or low_confidence
+
+    def _generate_bayesian_evidence_goal(
+        self, 
+        observations, 
+        uncertainty_metrics: Optional[Dict[str, float]]
+    ) -> Optional[GoalState]:
+        """Generate evidence-based goal enhanced with Bayesian information.
+        
+        Args:
+            observations: Current observations.
+            uncertainty_metrics: Uncertainty estimates (may be None).
+            
+        Returns:
+            Enhanced evidence-based goal state.
+        """
+        try:
+            # Use traditional evidence approach to get candidate location
+            target_loc_id, target_separation = self._compute_bayesian_graph_mismatch(uncertainty_metrics)
+            
+            # Get pose information for the target point
+            target_info = self._get_target_loc_info(target_loc_id)
+            
+            # Enhanced confidence computation using Bayesian information
+            goal_confidence = self._compute_bayesian_goal_confidence(
+                lm_output_confidence=self.parent_lm.get_output().confidence,
+                separation=target_separation,
+                uncertainty_metrics=uncertainty_metrics
+            )
+            
+            # Compute the goal state with Bayesian enhancements
+            motor_goal_state = self._compute_bayesian_goal_state_for_target_loc(
+                observations,
+                target_info,
+                goal_confidence=goal_confidence,
+                uncertainty_metrics=uncertainty_metrics
+            )
+            
+            return motor_goal_state
+            
+        except Exception as e:
+            logger.debug(f"Error generating Bayesian evidence goal: {e}")
+            return self._generate_none_goal_state()
+
+    def _compute_bayesian_graph_mismatch(
+        self, 
+        uncertainty_metrics: Optional[Dict[str, float]]
+    ) -> Tuple[int, float]:
+        """Enhanced graph mismatch computation using Bayesian information.
+        
+        Args:
+            uncertainty_metrics: Current uncertainty estimates.
+            
+        Returns:
+            Tuple of (target_location_id, target_separation) enhanced with Bayesian info.
+        """
+        logger.debug("Computing Bayesian-enhanced graph mismatch for hypothesis testing")
+
+        top_id, second_id = self.parent_lm.get_top_two_mlh_ids()
+        top_mlh = self.parent_lm.get_mlh_for_object(top_id)
+        second_mlh_object = self.parent_lm.get_mlh_for_object(second_id)
+
+        # Enhanced decision making for pose vs object focus
+        if uncertainty_metrics:
+            epistemic_uncertainty = uncertainty_metrics['epistemic']
+            
+            # Use Bayesian uncertainty to inform focus decision
+            if epistemic_uncertainty > self.uncertainty_threshold:
+                # High epistemic uncertainty suggests we need more object discrimination
+                self.focus_on_pose = False
+                logger.debug("High epistemic uncertainty: focusing on object discrimination")
+            else:
+                # Lower epistemic uncertainty suggests object is known, focus on pose
+                self.focus_on_pose = True
+                logger.debug("Lower epistemic uncertainty: focusing on pose refinement")
+        else:
+            # Fall back to traditional evidence-based decision
+            top_mlh_graph = self.parent_lm.get_graph(top_id, input_channel="first").pos
+            
+            if self.focus_on_pose:
+                second_id = top_id
+                _, second_mlh = self.parent_lm.get_top_two_pose_hypotheses_for_graph_id(top_id)
+            else:
+                second_mlh = second_mlh_object
+
+        # Continue with traditional graph mismatch computation
+        # (keeping existing logic but with Bayesian-informed decisions)
+        return self._traditional_graph_mismatch_computation(top_id, second_id, top_mlh, second_mlh_object)
+
+    def _traditional_graph_mismatch_computation(
+        self, 
+        top_id: str, 
+        second_id: str, 
+        top_mlh: Dict, 
+        second_mlh_object: Dict
+    ) -> Tuple[int, float]:
+        """Traditional graph mismatch computation (existing logic).
+        
+        Args:
+            top_id: ID of top hypothesis.
+            second_id: ID of second hypothesis.
+            top_mlh: Top MLH data.
+            second_mlh_object: Second MLH object data.
+            
+        Returns:
+            Tuple of (target_location_id, target_separation).
+        """
+        # Existing graph mismatch logic from original EvidenceGoalStateGenerator
+        top_mlh_graph = self.parent_lm.get_graph(top_id, input_channel="first").pos
+
+        if self.focus_on_pose:
+            second_id = top_id
+            _, second_mlh = self.parent_lm.get_top_two_pose_hypotheses_for_graph_id(top_id)
+        else:
+            second_mlh = second_mlh_object
+
+        # Graph transformation and KDTree search (existing logic)
+        rotated_graph = top_mlh["rotation"].inv().apply(top_mlh_graph)
+        current_mlh_location = top_mlh["rotation"].inv().apply(top_mlh["location"])
+        top_mlh_graph = rotated_graph - current_mlh_location
+        
+        top_mlh_graph = (
+            second_mlh["rotation"].apply(top_mlh_graph) + second_mlh["location"]
+        )
+
+        radius_node_dists = self.parent_lm.get_graph(
+            second_id, input_channel="first"
+        ).find_nearest_neighbors(
+            top_mlh_graph,
+            num_neighbors=1,
+            return_distance=True,
+        )
+
+        target_loc_id = np.argmax(radius_node_dists)
+        target_loc_separation = np.max(radius_node_dists)
+
+        self.prev_top_mlhs = [top_mlh, second_mlh_object]
+
+        return target_loc_id, target_loc_separation
+
+    def _compute_bayesian_goal_confidence(
+        self, 
+        lm_output_confidence: float, 
+        separation: float, 
+        uncertainty_metrics: Optional[Dict[str, float]],
+        space_size: float = 1.0, 
+        confidence_weighting: float = 0.1
+    ) -> float:
+        """Enhanced goal confidence computation using Bayesian information.
+        
+        Args:
+            lm_output_confidence: Confidence from learning module output.
+            separation: Separation distance in hypothesis space.
+            uncertainty_metrics: Bayesian uncertainty estimates.
+            space_size: Scale for normalizing separation.
+            confidence_weighting: Weight for confidence term.
+            
+        Returns:
+            Enhanced confidence value for the goal state.
+        """
+        base_confidence = lm_output_confidence
+        
+        if uncertainty_metrics:
+            # Higher uncertainty increases goal confidence (more important to test)
+            uncertainty_boost = uncertainty_metrics['epistemic'] * self.bayesian_evidence_weight
+            
+            # Information gain factor based on separation
+            separation_factor = np.clip(separation / space_size, 0, 1)
+            
+            # Combined confidence
+            enhanced_confidence = (
+                base_confidence * (1 - self.bayesian_evidence_weight) +
+                uncertainty_boost +
+                separation_factor * confidence_weighting
+            )
+            
+            return np.clip(enhanced_confidence, 0.1, 1.0)
+        else:
+            return base_confidence
+
+    def _compute_bayesian_goal_state_for_target_loc(
+        self, 
+        observations, 
+        target_info: Dict, 
+        goal_confidence: float = 1.0,
+        uncertainty_metrics: Optional[Dict[str, float]] = None
+    ) -> GoalState:
+        """Enhanced goal state computation with Bayesian information.
+        
+        Args:
+            observations: Current observations.
+            target_info: Target location information.
+            goal_confidence: Confidence for the goal state.
+            uncertainty_metrics: Bayesian uncertainty estimates.
+            
+        Returns:
+            Enhanced goal state with Bayesian metadata.
+        """
+        # Use existing goal state computation logic
+        sensor_channel_name = self.parent_lm.buffer.get_first_sensory_input_channel()
+        sensory_input = get_state_from_channel(
+            states=observations, channel_name=sensor_channel_name
+        )
+        
+        displacement = (
+            target_info["target_loc"] - target_info["hypothesis_to_test"]["location"]
+        )
+
+        object_rot = target_info["hypothesis_to_test"]["rotation"].inv()
+        rotated_disp = object_rot.apply(displacement)
+        proposed_surface_loc = sensory_input.location + rotated_disp
+
+        target_pn_rotated = object_rot.apply(target_info["target_pn"])
+        
+        # Adjust desired distance based on uncertainty
+        distance_factor = 1.0
+        if uncertainty_metrics:
+            # Higher uncertainty -> move closer for better sensing
+            distance_factor = 1.0 - uncertainty_metrics['epistemic'] * 0.3
+            
+        adjusted_distance = self.desired_object_distance * distance_factor * 1.5
+        surface_displacement = target_pn_rotated * adjusted_distance
+
+        target_loc = proposed_surface_loc + surface_displacement
+
+        # Enhanced metadata with Bayesian information
+        info = {
+            "proposed_surface_loc": proposed_surface_loc,
+            "hypothesis_to_test": target_info["hypothesis_to_test"],
+            "uncertainty_metrics": uncertainty_metrics,
+            "bayesian_enhanced": True,
+            "focus_on_pose": self.focus_on_pose,
+            "achieved": None,
+            "matching_step_when_output_goal_set": None,
+        }
+
+        motor_goal_state = GoalState(
+            location=np.array(target_loc),
+            morphological_features={
+                "pose_vectors": np.array([
+                    (-1) * target_pn_rotated,
+                    [np.nan, np.nan, np.nan],
+                    [np.nan, np.nan, np.nan],
+                ]),
+                "pose_fully_defined": None,
+                "on_object": 1,
+            },
+            non_morphological_features={
+                "exploration_type": "bayesian_evidence",
+                "expected_information_gain": uncertainty_metrics['epistemic'] if uncertainty_metrics else None,
+            },
+            confidence=goal_confidence,
+            use_state=True,
+            sender_id=self.parent_lm.learning_module_id,
+            sender_type="BayesianEvidenceGSG",
+            goal_tolerances=None,
+            info=info,
+        )
+
+        return motor_goal_state
+
+    def _check_conditions_for_hypothesis_test(self) -> bool:
+        """Enhanced hypothesis test conditions using Bayesian information.
+        
+        Returns:
+            True if conditions favor hypothesis testing.
+        """
+        # Get base conditions
+        base_conditions = super()._check_conditions_for_hypothesis_test if hasattr(super(), '_check_conditions_for_hypothesis_test') else self._traditional_hypothesis_test_conditions
+        
+        if callable(base_conditions):
+            traditional_result = base_conditions()
+        else:
+            traditional_result = False
+            
+        # Add Bayesian conditions
+        uncertainty_metrics = self._get_uncertainty_metrics()
+        
+        if uncertainty_metrics:
+            # High uncertainty suggests hypothesis testing would be valuable
+            high_uncertainty_condition = uncertainty_metrics['epistemic'] > self.uncertainty_threshold
+            
+            # Recent changes in uncertainty suggest new information available
+            uncertainty_trend_condition = self._check_uncertainty_trend()
+            
+            bayesian_conditions = high_uncertainty_condition or uncertainty_trend_condition
+            
+            return traditional_result or bayesian_conditions
+        else:
+            return traditional_result
+
+    def _check_uncertainty_trend(self) -> bool:
+        """Check if uncertainty has been changing recently.
+        
+        Returns:
+            True if uncertainty trend suggests hypothesis testing would be valuable.
+        """
+        if len(self.uncertainty_history) < 3:
+            return False
+            
+        recent_uncertainty = self.uncertainty_history[-3:]
+        uncertainty_change = np.std(recent_uncertainty)
+        
+        # If uncertainty is changing rapidly, hypothesis testing may be valuable
+        return uncertainty_change > 0.05
+
+    def _get_target_loc_info(self, target_loc_id: int) -> Dict:
+        """Get target location info (existing method from EvidenceGoalStateGenerator)."""
+        mlh = self.parent_lm.get_current_mlh()
+        mlh_id = mlh["graph_id"]
+
+        target_object = self.parent_lm.get_graph(mlh_id)
+        sensor_channel_name = self.parent_lm.buffer.get_first_sensory_input_channel()
+        target_graph = target_object[sensor_channel_name]
+        target_loc = target_graph.pos[target_loc_id]
+        pn_mapping = target_graph.feature_mapping["pose_vectors"]
+        target_pn = target_graph.x[target_loc_id, pn_mapping[0] : pn_mapping[0] + 3]
+
+        target_info = {
+            "hypothesis_to_test": mlh,
+            "target_loc": target_loc,
+            "target_pn": target_pn,
+        }
+
+        return target_info
 
 
 class EvidenceGoalStateGenerator(GraphGoalStateGenerator):
