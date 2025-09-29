@@ -365,7 +365,7 @@ class EvidenceGraphLM(GraphLM):
             for graph_id in evidences.keys():
                 interesting_hyp = np.where(
                     evidences[graph_id] > self.vote_evidence_threshold
-                )
+                ) # interesting_hyp[0] = indices of hypotheses with where evidence is above threshold
                 if len(interesting_hyp[0]) > 0:
                     possible_states[graph_id] = []
                     for hyp_id in interesting_hyp[0]:
