@@ -151,6 +151,7 @@ class DefaultHypothesesDisplacer:
                 f"Testing {num_hypotheses_to_test} out of "
                 f"{total_hypotheses_count} hypotheses for {graph_id} "
                 f"(evidence > {evidence_update_threshold})"
+                f"evidence for each hypothesis: {possible_hypotheses.evidence}"
             )
 
             # Get evidence update for all hypotheses with evidence > current

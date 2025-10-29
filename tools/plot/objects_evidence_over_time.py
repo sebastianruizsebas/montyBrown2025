@@ -44,8 +44,16 @@ def plot_objects_evidence_over_time(exp_path: str) -> int:
         logger.error(f"Experiment path not found: {exp_path}")
         return 1
 
-    # load detailed stats
-    _, _, detailed_stats, _ = load_stats(exp_path, False, False, True, False)
+    # load detailed stats - use keyword arguments instead of positional
+    _, _, detailed_stats, _ = load_stats(
+        exp_path=exp_path,
+        train_stats_path=None,
+        model_path_file=None,
+        load_train=False,
+        load_eval=False,
+        load_detailed=True,
+        load_models=False,
+    )
 
     plt.style.use("seaborn-darkgrid")
     # fix colors for distinct objects (tab10 supports up to 10 distinct colors)
@@ -54,18 +62,22 @@ def plot_objects_evidence_over_time(exp_path: str) -> int:
     ycb_colors = {obj: cmap(i / num_colors) for i, obj in enumerate(DISTINCT_OBJECTS)}
 
     classes = {
-        k: [] for k in list(detailed_stats["0"]["LM_0"]["max_evidence"][0].keys())
+        k: [] for k in list(detailed_stats["0"]["LM_0"]["evidences"][0].keys())
     }
     target_objects = []  # Objects in each segment, e.g., ['strawberry', 'banana']
     target_transitions = []  # Transition points on the x-axis, e.g., [49, 99]
 
     for episode_data in detailed_stats.values():
-        evidences_data = episode_data["LM_0"]["max_evidence"]
+        evidences_data = episode_data["LM_0"]["evidences"]
 
         # append evidence data to classes
         for ts in evidences_data:
             for k, v in ts.items():
-                classes[k].append(v)
+                if isinstance(v, (list, tuple)):
+                    scalar_v = v[0] if v else 0
+                else:
+                    scalar_v = v
+                classes[k].append(scalar_v)
 
         # collect the target object of this episode
         target_objects.append(episode_data["target"]["primary_target_object"])

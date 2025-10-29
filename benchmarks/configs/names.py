@@ -87,7 +87,7 @@ class UnsupervisedInferenceExperiments:
 
 @dataclass
 class MyExperiments:
-    surf_agent_6obj_train_10_12_2025: dict
+    surf_agent_6obj_eval_10_29: dict
 
 current_module = sys.modules[__name__]
 for _name, obj in inspect.getmembers(current_module):

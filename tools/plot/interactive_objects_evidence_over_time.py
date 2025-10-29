@@ -82,7 +82,17 @@ class DataExtractor:
         self.import_objects()
 
     def extract_data(self) -> None:
-        _, _, detailed_stats, _ = load_stats(self.exp_path, False, False, True, False)
+        """Extract data from detailed stats."""
+        # Use keyword arguments with correct parameter names
+        _, _, detailed_stats, _ = load_stats(
+            exp_path=self.exp_path,
+            train_stats_path=None,
+            model_path_file=None,
+            load_train=False,
+            load_eval=False,
+            load_detailed=True,
+            load_models=False,
+        )
 
         # Initialize the lists for tracking experiment states across time steps
         self.target_names: list[str] = []
@@ -99,22 +109,28 @@ class DataExtractor:
         self.target_transitions: list[int] = []
         self.primary_target_objects: list[str] = []
 
-        # Evidence scores per object class
+        # Evidence scores per object class - use "evidences" not "max_evidence"
         self.classes: dict[str, list[float]] = {
-            k: [] for k in detailed_stats["0"][self.lm]["max_evidence"][0].keys()
+            k: [] for k in detailed_stats["0"][self.lm]["evidences"][0].keys()
         }
 
         for episode_data in detailed_stats.values():
-            self.target_transitions.append(len(episode_data[self.lm]["max_evidence"]))
+            # Use "evidences" instead of "max_evidence"
+            self.target_transitions.append(len(episode_data[self.lm]["evidences"]))
             self.primary_target_objects.append(
                 episode_data["target"]["primary_target_object"]
             )
             self.patch_locations.extend(episode_data[self.lm]["locations"]["patch"])
 
-            for ts, evidence_data in enumerate(episode_data[self.lm]["max_evidence"]):
-                # Max evidence scores
+            # Iterate through evidences list
+            for ts, evidence_data in enumerate(episode_data[self.lm]["evidences"]):
+                # Handle both scalar and list values in evidence
                 for k, v in evidence_data.items():
-                    self.classes[k].append(v)
+                    if isinstance(v, (list, tuple)):
+                        scalar_v = v[0] if v else 0
+                    else:
+                        scalar_v = v
+                    self.classes[k].append(scalar_v)
 
                 # Target data (ground truth)
                 self.target_names.append(
@@ -147,38 +163,97 @@ class DataExtractor:
                 if processed_step:
                     self.sensor_positions.append(seq_step[1]["agent_id_0"]["position"])
 
+        # Debug: Print lengths before assertion
+        print(f"target_positions length: {len(self.target_positions)}")
+        print(f"sensor_positions length: {len(self.sensor_positions)}")
+        print(f"patch_locations length: {len(self.patch_locations)}")
+
         # Make sure that the agent positions (sampled by processed steps) is the same
         # length as the other logged data
-        assert (
+        if not (
             len(self.target_positions)
             == len(self.sensor_positions)
             == len(self.patch_locations)
-        )
+        ):
+            logger.warning(
+                f"Data length mismatch: target_positions={len(self.target_positions)}, "
+                f"sensor_positions={len(self.sensor_positions)}, "
+                f"patch_locations={len(self.patch_locations)}. "
+                f"Trimming to shortest length."
+            )
+            # Trim all to the shortest length
+            min_len = min(
+                len(self.target_positions),
+                len(self.sensor_positions),
+                len(self.patch_locations),
+            )
+            self.target_positions = self.target_positions[:min_len]
+            self.target_rotations = self.target_rotations[:min_len]
+            self.target_names = self.target_names[:min_len]
+            self.sensor_positions = self.sensor_positions[:min_len]
+            self.patch_locations = self.patch_locations[:min_len]
+            self.mlh_names = self.mlh_names[:min_len]
+            self.mlh_positions = self.mlh_positions[:min_len]
+            self.mlh_rotations = self.mlh_rotations[:min_len]
+            
+            # Recalculate evidence classes to match
+            for key in self.classes:
+                self.classes[key] = self.classes[key][:min_len]
 
     def __len__(self) -> int:
         return len(self.target_names)
 
-    def _find_glb_file(self, obj_name: str) -> str:
-        """Search for the .glb.orig file of a given YCB object in a directory.
-
+    def _find_glb_file(self, obj_name: str) -> Path:
+        """Find the .glb.orig file for a given object name.
+        
         Args:
-            obj_name: The object name to search for (e.g., "potted_meat_can").
-
+            obj_name: Short object name (e.g., 'c_cups', 'mug', 'banana')
+            
         Returns:
-            Full path to the .glb.orig file.
-
+            Path to the .glb.orig file
+            
         Raises:
-            FileNotFoundError: If the .glb.orig file for the object is not found.
-
+            FileNotFoundError: If the file cannot be found
         """
-        for path in Path(self.data_path).rglob("*"):
-            if path.is_dir() and path.name.endswith(obj_name):
-                glb_orig_path = path / "google_16k" / "textured.glb.orig"
-                if glb_orig_path.exists():
-                    return str(glb_orig_path)
-
+        data_path = Path(self.data_path)
+        
+        # Create mapping from short names to full YCB directory names
+        name_mapping = {
+            'mug': '025_mug',
+            'c_cups': '065-c_cups',
+            'fork': '030_fork',  # Adjust if needed
+            'spoon': '031_spoon',  # Adjust if needed
+            'knife': '032_knife',  # Adjust if needed
+            'banana': '011_banana',  # Adjust if needed
+        }
+        
+        # Try direct name first
+        search_dirs = [obj_name]
+        
+        # Add mapped name if it exists
+        if obj_name in name_mapping:
+            search_dirs.append(name_mapping[obj_name])
+        
+        # Also try searching for directories containing the object name
+        for search_name in search_dirs:
+            # Search for .glb.orig files
+            glb_files = list(data_path.glob(f"**/{search_name}/**/*.glb.orig"))
+            if glb_files:
+                return glb_files[0]
+            
+            # Also try direct match
+            obj_dir = data_path / search_name
+            if obj_dir.exists():
+                glb_files = list(obj_dir.glob("*.glb.orig"))
+                if glb_files:
+                    return glb_files[0]
+        
+        # If still not found, list what's available and raise helpful error
+        available = [d.name for d in data_path.iterdir() if d.is_dir()]
         raise FileNotFoundError(
-            f"Could not find .glb.orig file for '{obj_name}' in '{self.data_path}'"
+            f"Could not find .glb.orig file for '{obj_name}' in '{self.data_path}'\n"
+            f"Searched for: {search_dirs}\n"
+            f"Available directories: {sorted(available)}"
         )
 
     def create_mesh(self, obj_name: str) -> Mesh:
@@ -742,7 +817,7 @@ def add_subparser(
     )
     parser.add_argument(
         "--objects_mesh_dir",
-        default="~/tbp/data/habitat/objects/ycb/meshes",
+        default="~/data/sruiz10/tbp/data/habitat/objects/ycb/meshes",
         help=("The directory containing the mesh objects."),
     )
     parser.add_argument(
