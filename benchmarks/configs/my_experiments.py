@@ -518,7 +518,8 @@ Basic setup
 project_dir = os.path.expanduser("~/tbp/results/monty/projects")
 
 # Specify a name for the model.
-model_name = "surf_agent_1lm_2obj"
+model_name = "surf_agent_1lm_6obj"
+
 """
 Training
 ----------------------------------------------------------------------------------------
@@ -526,12 +527,12 @@ Training
 # Here we specify which objects to learn. 'mug' and 'banana' come from the YCB dataset.
 # If you don't have the YCB dataset, replace with names from habitat (e.g.,
 # 'capsule3DSolid', 'cubeSolid', etc.).
-object_names = ["mug", "" "banana"]
+object_names = ["mug","c_cups", "fork", "spoon", "knife", "banana"]
 # Get predefined object rotations that give good views of the object from 14 angles.
 train_rotations = get_cube_face_and_corner_views_rotations()
 
 # The config dictionary for the pretraining experiment.
-surf_agent_2obj_train = dict(
+surf_agent_6obj_train_10_12_2025 = dict(
     # Specify monty experiment and its args.
     # The MontySupervisedObjectPretrainingExperiment class will provide the model
     # with object and pose labels for supervised pretraining.
@@ -602,6 +603,14 @@ surf_agent_2obj_train = dict(
         object_names=object_names,
         object_init_sampler=PredefinedObjectInitializer(rotations=train_rotations),
     ),
-
+    # For a complete config we need to specify an eval_dataloader but since we only train here, this is unused
+    eval_dataloader_class=ED.InformedEnvironmentDataLoader,
+    eval_dataloader_args=EnvironmentDataloaderPerObjectArgs(
+        object_names=object_names,
+        object_init_sampler=PredefinedObjectInitializer(rotations=train_rotations),
+    ),
 )
-
+experiments = MyExperiments(
+    surf_agent_6obj_train_10_12_2025=surf_agent_6obj_train_10_12_2025,
+)
+CONFIGS = asdict(experiments)

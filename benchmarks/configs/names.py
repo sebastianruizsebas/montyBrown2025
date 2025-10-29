@@ -87,17 +87,7 @@ class UnsupervisedInferenceExperiments:
 
 @dataclass
 class MyExperiments:
-<<<<<<< HEAD
-<<<<<<< HEAD
-    # Add your experiment names here
-    pass
-=======
-    dist_agent_2lm_stack_eval: dict
->>>>>>> e7c7c19 (Ran experiments for poster)
-
-=======
-    dist_agent_2lm_stack_eval: dict
->>>>>>> 8cb6a03153fe1ffdab9bc06a7a39c1e8e77c96be
+    surf_agent_6obj_train_10_12_2025: dict
 
 current_module = sys.modules[__name__]
 for _name, obj in inspect.getmembers(current_module):
