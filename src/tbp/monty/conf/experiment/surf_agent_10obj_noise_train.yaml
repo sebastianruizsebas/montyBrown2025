@@ -17,7 +17,7 @@ config:
   n_train_epochs: ${benchmarks.rotations_all_count}
   logging:
     output_dir: ${path.expanduser:"~/data/sruiz10/tbp/results/monty/projects"}
-    run_name: surf_agent_1lm_2obj_train
+    run_name: Feb25_surf_10obj_no_noise
     wandb_handlers: []
   monty_config:
     monty_args:
@@ -62,7 +62,15 @@ config:
   train_env_interface_args:
     object_names:
       - mug
-      - banana
+      - bowl
+      - potted_meat_can
+      - master_chef_can
+      - i_cups
+      - spoon
+      - b_cups
+      - pitcher_base
+      - knife
+      - b_marbles
     object_init_sampler:
       _target_: tbp.monty.frameworks.environments.object_init_samplers.Predefined
       rotations: ${benchmarks.rotations_all}

@@ -17,7 +17,7 @@ config:
   n_train_epochs: ${benchmarks.rotations_all_count}
   logging:
     output_dir: ${path.expanduser:"~/data/sruiz/tbp/results/monty/projects"}
-    run_name: Feb25_surf_33obj
+    run_name: Feb25_surf_34obj
     wandb_handlers: []
   monty_config:
     monty_args:

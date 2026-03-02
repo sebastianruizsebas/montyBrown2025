@@ -14,15 +14,16 @@ defaults:
 _target_: tbp.monty.frameworks.experiments.object_recognition_experiments.MontyObjectRecognitionExperiment
 config:
   # load the pre-trained models from this path; this needs to be the same name as used for pretraining
-  model_name_or_path: ${path.expanduser:"~/data/sruiz10/tbp/results/monty/projects/Feb25_surf_33obj/pretrained"}
+  model_name_or_path: ${path.expanduser:"~/data/sruiz10/tbp/results/monty/projects/Feb25_surf_34obj/pretrained"}
   n_eval_epochs: 3
   max_total_steps: 5000
   show_sensor_output: false # live visualization of Monty's observations and MLH
   logging:
+    monty_handlers:
+      - ${monty.class:tbp.monty.frameworks.loggers.monty_handlers.BasicCSVStatsHandler}
     # where to save eval logs
     output_dir: ${path.expanduser:"~/data/sruiz10/tbp/results/monty/projects"}
-    run_name: Feb25_surf_33obj_eval_4_noise
-    wandb_handlers: [] # remove this line if you, additionally, want to log to WandB
+    run_name: Feb25_surf_34obj_eval_4_noise
   monty_config:
     monty_args:
       min_eval_steps: 20
